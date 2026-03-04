@@ -1,0 +1,10 @@
+{
+  "customer_id": "C003",
+  "event": {
+    "event_type": "onboarding",
+    "trigger_source": "relationship_manager",
+    "triggered_at": "2024-03-04T11:00:00Z",
+    "notes": "Prospective client from energy sector, Russian national"
+  },
+  "mission_description": "Perform full KYC name screening for new individual customer C003 (Valeria Petrov, RUS national), an energy sector executive from Russia. The customer originates from a FATF high-risk jurisdiction. Verify identity, screen against all applicable UN, OFAC, EU and HKMA sanctions lists, assess adverse media, and make a compliance decision per AMLO requirements."
+}
