@@ -92,21 +92,41 @@ class TaskPlanner:
     # ------------------------------------------------------------------
 
     def _extract_json(self, text: str) -> dict:
-        # Strip markdown code blocks
+        """
+        Extract the first valid balanced JSON object from text.
+        Strips model special tokens before parsing.
+        """
+        # Remove special tokens (<|endoftext|>, <|im_end|>, etc.) and everything after
+        text = re.sub(r"<\|[^|]+\|>.*", "", text, flags=re.DOTALL).strip()
+
+        # Try fenced code block first
         code = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
         if code:
             try:
                 return json.loads(code.group(1))
             except json.JSONDecodeError:
                 pass
-        # Raw JSON
-        first = text.find("{")
-        last = text.rfind("}")
-        if first != -1 and last != -1:
-            try:
-                return json.loads(text[first : last + 1])
-            except json.JSONDecodeError:
-                pass
+
+        # Walk the text to find the first syntactically balanced {} block
+        i = 0
+        while i < len(text):
+            if text[i] != "{":
+                i += 1
+                continue
+            depth = 0
+            start = i
+            for j in range(i, len(text)):
+                if text[j] == "{":
+                    depth += 1
+                elif text[j] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        candidate = text[start : j + 1]
+                        try:
+                            return json.loads(candidate)
+                        except json.JSONDecodeError:
+                            break  # malformed block — skip to next {
+            i += 1
         return {}
 
     def _default_plan(self, mission_description: str) -> dict:
@@ -185,6 +205,16 @@ class TaskPlanner:
                         print()
                         console.print("[dim]  └────────────────────────────────────────[/dim]")
                         console.print("[dim]  ┌─ Execution Plan (JSON) ───────────────[/dim]")
+                    # Stop at end-of-sequence special tokens emitted by some models
+                    if "<|endoftext|>" in msg.content or "<|im_end|>" in msg.content:
+                        stop_at = min(
+                            (msg.content.find(t) for t in ("<|endoftext|>", "<|im_end|>") if t in msg.content)
+                        )
+                        tail = msg.content[:stop_at]
+                        if tail:
+                            content_text += tail
+                            print(tail, end="", flush=True)
+                        break
                     content_text += msg.content
                     print(msg.content, end="", flush=True)
 

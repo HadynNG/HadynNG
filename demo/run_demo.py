@@ -84,7 +84,7 @@ def select_case(arg: str | None) -> tuple[str, dict]:
         )
 
     case_file = CASES[case_name]
-    with open(case_file) as f:
+    with open(case_file, encoding="utf-8") as f:
         payload = json.load(f)
 
     console.print(

@@ -138,6 +138,16 @@ class BaseAgent(ABC):
                         print()  # newline after thinking
                         console.print("[dim]  └────────────────────────────────────────[/dim]")
                         console.print("[dim]  ┌─ Response ────────────────────────────────[/dim]")
+                    # Stop at end-of-sequence special tokens emitted by some models
+                    if "<|endoftext|>" in msg.content or "<|im_end|>" in msg.content:
+                        stop_at = min(
+                            (msg.content.find(t) for t in ("<|endoftext|>", "<|im_end|>") if t in msg.content)
+                        )
+                        tail = msg.content[:stop_at]
+                        if tail:
+                            content_buffer += tail
+                            print(tail, end="", flush=True)
+                        break
                     content_buffer += msg.content
                     print(msg.content, end="", flush=True)
 
@@ -158,22 +168,41 @@ class BaseAgent(ABC):
         return thinking_text.strip(), content_text.strip()
 
     def _extract_json(self, text: str) -> dict:
-        """Try to extract JSON from LLM response text."""
-        # Try code block first
+        """
+        Extract the first valid balanced JSON object from text.
+        Strips model special tokens before parsing.
+        """
+        # Remove special tokens (<|endoftext|>, <|im_end|>, etc.) and everything after
+        text = re.sub(r"<\|[^|]+\|>.*", "", text, flags=re.DOTALL).strip()
+
+        # Try fenced code block first
         code_block = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
         if code_block:
             try:
                 return json.loads(code_block.group(1))
             except json.JSONDecodeError:
                 pass
-        # Try raw JSON
-        first_brace = text.find("{")
-        last_brace = text.rfind("}")
-        if first_brace != -1 and last_brace != -1:
-            try:
-                return json.loads(text[first_brace : last_brace + 1])
-            except json.JSONDecodeError:
-                pass
+
+        # Walk the text to find the first syntactically balanced {} block
+        i = 0
+        while i < len(text):
+            if text[i] != "{":
+                i += 1
+                continue
+            depth = 0
+            start = i
+            for j in range(i, len(text)):
+                if text[j] == "{":
+                    depth += 1
+                elif text[j] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        candidate = text[start : j + 1]
+                        try:
+                            return json.loads(candidate)
+                        except json.JSONDecodeError:
+                            break  # malformed block — skip to next {
+            i += 1
         return {}
 
     # ------------------------------------------------------------------

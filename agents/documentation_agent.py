@@ -68,7 +68,7 @@ class DocumentationAgent(BaseAgent):
             "retention_policy": "5 years — AMLO Section 20",
         }
 
-        with open(log_file, "w") as f:
+        with open(log_file, "w", encoding="utf-8") as f:
             json.dump(audit_payload, f, indent=2, default=str)
 
         self._print_action(

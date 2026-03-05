@@ -44,21 +44,39 @@ class DataCollectionAgent(BaseAgent):
         thinking, response = self._llm_reason(
             system_prompt=(
                 "You are an AI agent in a KYC compliance platform. "
-                "Your task is to classify the incoming event and determine if the data is sufficient "
-                "to proceed or needs escalation. Be concise and structured.\n"
+                "Your task is to classify the incoming TRIGGER EVENT and validate its metadata.\n\n"
+                "CRITICAL: The event payload is a TRIGGER NOTIFICATION ONLY. "
+                "It is expected to contain ONLY: event_type, trigger_source, triggered_at, and optional notes. "
+                "Customer personal data (name, ID, DOB, address) is NOT part of the event — "
+                "it will be retrieved from the CRM database in the next pipeline step. "
+                "Do NOT flag missing customer fields as a problem.\n\n"
+                "Check ONLY:\n"
+                "1. Is event_type present and valid?\n"
+                "2. Is trigger_source present?\n"
+                "3. Is triggered_at present?\n\n"
+                "Set proceed=true if event_type is valid, regardless of other fields.\n"
                 "Respond in this JSON format:\n"
                 '{"event_type": "...", "is_complete": true/false, '
                 '"missing_fields": [], "reasoning": "...", "proceed": true/false}'
             ),
             user_prompt=(
-                f"Classify this event and check completeness:\n{event}\n\n"
-                f"Valid event types: {list(EVENT_TYPES)}"
+                f"Classify this trigger event:\n{event}\n\n"
+                f"Valid event types: {list(EVENT_TYPES)}\n\n"
+                "Remember: only check event_type, trigger_source, triggered_at. "
+                "Customer data is fetched from CRM in the next step — do not flag it as missing."
             ),
         )
 
         parsed = self._extract_json(response)
         event_type = parsed.get("event_type", event.get("event_type", "onboarding"))
-        proceed = parsed.get("proceed", True)
+
+        # Defensive fallback: if the LLM incorrectly flagged customer fields as missing,
+        # but the event_type is valid, still proceed. Only halt on truly invalid events.
+        raw_event_type = event.get("event_type", "")
+        if raw_event_type in EVENT_TYPES:
+            proceed = True  # event_type is valid — always proceed to CRM step
+        else:
+            proceed = parsed.get("proceed", True)
 
         self._print_action(
             f"Event classified as: [bold]{event_type}[/bold]",
@@ -66,9 +84,9 @@ class DataCollectionAgent(BaseAgent):
         )
 
         if not proceed:
-            self._print_decision("ESCALATE — incomplete event data", color="red")
+            self._print_decision("ESCALATE — invalid or incomplete event data", color="red")
             context["status"] = "ESCALATED_MISSING_DATA"
-            self._log(context, "Escalated at Step 1.1 — incomplete event data", "WARN")
+            self._log(context, "Escalated at Step 1.1 — invalid event data", "WARN")
             return context
 
         context["event_type"] = event_type
