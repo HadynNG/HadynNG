@@ -176,6 +176,10 @@ class TaskPlanner:
         thinking_text = ""
         content_text = ""
 
+        # Character-level safety caps to prevent infinite generation loops
+        MAX_THINKING_CHARS = 24_000   # planning needs more thinking room
+        MAX_CONTENT_CHARS  = 8_000    # JSON plan can be verbose
+
         try:
             console.print("[dim]  ┌─ Orchestrator Thinking ───────────────────[/dim]")
             stream = self.client.chat(
@@ -192,7 +196,11 @@ class TaskPlanner:
                 ],
                 stream=True,
                 think=True,
-                options={"temperature": 0.05},
+                options={
+                    "temperature": 0.05,
+                    "num_predict": 4096,
+                    "repeat_penalty": 1.1,
+                },
             )
 
             for chunk in stream:
@@ -200,6 +208,11 @@ class TaskPlanner:
                 if hasattr(msg, "thinking") and msg.thinking:
                     thinking_text += msg.thinking
                     print(f"\033[33m{msg.thinking}\033[0m", end="", flush=True)
+                    # Safety: break if thinking loops indefinitely
+                    if len(thinking_text) > MAX_THINKING_CHARS:
+                        print()
+                        console.print("\n[yellow]  [thinking truncated — generation cap reached][/yellow]")
+                        break
                 if msg.content:
                     if not content_text and thinking_text:
                         print()
@@ -217,6 +230,10 @@ class TaskPlanner:
                         break
                     content_text += msg.content
                     print(msg.content, end="", flush=True)
+                    # Safety: break if content loops indefinitely
+                    if len(content_text) > MAX_CONTENT_CHARS:
+                        console.print("\n[yellow]  [response truncated — generation cap reached][/yellow]")
+                        break
 
             print()
             console.print("[dim]  └────────────────────────────────────────[/dim]")

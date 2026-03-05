@@ -93,11 +93,20 @@ class BaseAgent(ABC):
         user_prompt: str,
         show_thinking: bool = True,
         temperature: float = 0.1,
+        max_tokens: int = 2048,
     ) -> tuple[str, str]:
         """
         Call the LLM, stream output, and return (thinking, content).
         Displays the chain-of-thought in real time.
+
+        Args:
+            max_tokens: Hard cap on tokens generated (thinking + content).
+                        Prevents infinite loops from model repetition cycles.
         """
+        # Character-level safety caps (rough proxy for tokens; prevents runaway generation)
+        MAX_THINKING_CHARS = max_tokens * 6   # thinking is verbose; allow ~6 chars/token
+        MAX_CONTENT_CHARS  = max_tokens * 4
+
         console.print(f"\n[dim italic]  Querying {self.model}...[/dim italic]")
 
         messages = [
@@ -105,7 +114,6 @@ class BaseAgent(ABC):
             {"role": "user", "content": user_prompt},
         ]
 
-        full_text = ""
         thinking_text = ""
         content_text = ""
 
@@ -115,27 +123,33 @@ class BaseAgent(ABC):
                 messages=messages,
                 stream=True,
                 think=True,
-                options={"temperature": temperature},
+                options={
+                    "temperature": temperature,
+                    "num_predict": max_tokens,
+                    "repeat_penalty": 1.1,
+                },
             )
 
-            # Collect streaming output
             thinking_buffer = ""
             content_buffer = ""
-            in_thinking = False
 
             console.print("[dim]  ┌─ Thinking ────────────────────────────────[/dim]")
             for chunk in stream:
                 msg = chunk.message
                 # Handle native thinking tokens (ollama >= 0.4)
                 if hasattr(msg, "thinking") and msg.thinking:
-                    chunk_thinking = msg.thinking
-                    thinking_buffer += chunk_thinking
+                    thinking_buffer += msg.thinking
                     if show_thinking:
-                        print(f"\033[33m{chunk_thinking}\033[0m", end="", flush=True)
+                        print(f"\033[33m{msg.thinking}\033[0m", end="", flush=True)
+                    # Safety: break if thinking exceeds character cap
+                    if len(thinking_buffer) > MAX_THINKING_CHARS:
+                        print()
+                        console.print("\n[yellow]  [thinking truncated — generation cap reached][/yellow]")
+                        break
                 if msg.content:
                     if not content_buffer and thinking_buffer:
                         # Transition from thinking to content
-                        print()  # newline after thinking
+                        print()
                         console.print("[dim]  └────────────────────────────────────────[/dim]")
                         console.print("[dim]  ┌─ Response ────────────────────────────────[/dim]")
                     # Stop at end-of-sequence special tokens emitted by some models
@@ -150,6 +164,10 @@ class BaseAgent(ABC):
                         break
                     content_buffer += msg.content
                     print(msg.content, end="", flush=True)
+                    # Safety: break if content exceeds character cap
+                    if len(content_buffer) > MAX_CONTENT_CHARS:
+                        console.print("\n[yellow]  [response truncated — generation cap reached][/yellow]")
+                        break
 
             print()  # final newline
             console.print("[dim]  └────────────────────────────────────────[/dim]")
