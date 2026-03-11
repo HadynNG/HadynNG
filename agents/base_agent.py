@@ -33,7 +33,7 @@ class BaseAgent(ABC):
     name: str = "BaseAgent"
     step_label: str = "Step ?"
 
-    def __init__(self, model: str = "qwen3-coder-next:latest", ollama_host: str = "http://localhost:11434"):
+    def __init__(self, model: str = "qwen3.5:9b", ollama_host: str = "http://localhost:11434"):
         self.model = model
         self.client = ollama.Client(host=ollama_host)
 
@@ -92,7 +92,7 @@ class BaseAgent(ABC):
         system_prompt: str,
         user_prompt: str,
         show_thinking: bool = True,
-        temperature: float = 0.1,
+        temperature: float = 0.05,
         max_tokens: int = 2048,
     ) -> tuple[str, str]:
         """
@@ -127,6 +127,7 @@ class BaseAgent(ABC):
                     "temperature": temperature,
                     "num_predict": max_tokens,
                     "repeat_penalty": 1.1,
+                    "seed": 42,
                 },
             )
 

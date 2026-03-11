@@ -1,9 +1,14 @@
 """
 Mock CRM Tool — simulates internal customer database queries.
 In production this would call a real CRM/database API.
+
+Supports dynamic customer registration for user-entered demo customers.
 """
 from datetime import datetime
 
+
+# Runtime-registered customers (populated by run_demo.py for user-entered cases)
+_RUNTIME_CUSTOMERS: dict = {}
 
 # Simulated CRM database
 _CRM_DB = {
@@ -81,7 +86,29 @@ MEDIUM_RISK_JURISDICTIONS = {
 class CRMTool:
     """Mock CRM tool for customer data retrieval."""
 
+    @staticmethod
+    def register_customer(customer_data: dict) -> str:
+        """
+        Register a new customer at runtime (for user-entered demo cases).
+        Returns the assigned customer_id.
+        """
+        customer_id = customer_data.get("customer_id") or f"DEMO-{len(_RUNTIME_CUSTOMERS) + 1:03d}"
+        _RUNTIME_CUSTOMERS[customer_id] = {
+            **customer_data,
+            "customer_id": customer_id,
+            "account_opened": datetime.utcnow().strftime("%Y-%m-%d"),
+            "last_reviewed": datetime.utcnow().strftime("%Y-%m-%d"),
+            "existing_risk_rating": "UNKNOWN",
+        }
+        return customer_id
+
     def get_customer(self, customer_id: str) -> dict:
+        # Runtime customers take priority (user-entered demo cases)
+        if customer_id in _RUNTIME_CUSTOMERS:
+            record = dict(_RUNTIME_CUSTOMERS[customer_id])
+            record["found"] = True
+            record["retrieved_at"] = datetime.utcnow().isoformat() + "Z"
+            return record
         if customer_id not in _CRM_DB:
             return {"error": f"Customer {customer_id} not found", "found": False}
         record = dict(_CRM_DB[customer_id])

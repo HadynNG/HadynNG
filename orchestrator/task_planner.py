@@ -81,7 +81,7 @@ class TaskPlanner:
 
     def __init__(
         self,
-        model: str = "qwen3-coder-next:latest",
+        model: str = "qwen3.5:9b",
         ollama_host: str = "http://localhost:11434",
     ):
         self.model = model
@@ -200,6 +200,7 @@ class TaskPlanner:
                     "temperature": 0.05,
                     "num_predict": 4096,
                     "repeat_penalty": 1.1,
+                    "seed": 42,
                 },
             )
 
