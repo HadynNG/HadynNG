@@ -29,27 +29,66 @@ class DecisionAgent(BaseAgent):
     @staticmethod
     def _rule_based_decision(context: dict) -> tuple[str, bool]:
         """
-        Returns (decision, requires_str) based on hard rules.
-        Used as primary anchor when LLM JSON is unparseable.
+        Returns (decision, requires_str) based on hard, deterministic rules.
+
+        REJECT boundary — only triggered by factual, direct evidence:
+          • A TRUE_POSITIVE match on a SANCTIONS list (UN, OFAC, EU, HKMA)
+          REJECT means the customer is confirmed on a government sanctions list.
+
+        ESCALATE_TO_MLRO — triggered by ambiguous or indirect risk signals:
+          • TRUE_POSITIVE on a PEP database (needs human judgement, not auto-reject)
+          • HIGH risk with adverse media but no confirmed sanctions match
+          • Any unresolved TRUE_POSITIVE when risk level is not HIGH
+
+        Everything else follows the risk band.
         """
         risk_level = context.get("risk_level", "LOW")
         investigations = context.get("investigation_results", [])
-        true_positives = [i for i in investigations if i["classification"] == "TRUE_POSITIVE"]
         customer = context.get("customer_data", {})
         is_pep = customer.get("pep_self_declared", False)
         total_hits = context.get("screening_results", {}).get("total_hits", 0)
         adverse_count = len(context.get("adverse_media", []))
 
-        if true_positives and risk_level == "HIGH":
+        # Separate sanctions TRUE_POSITIVEs from PEP TRUE_POSITIVEs
+        sanctions_tp = [
+            i for i in investigations
+            if i["classification"] == "TRUE_POSITIVE"
+            and i.get("alert", {}).get("match_type") == "SANCTIONS"
+        ]
+        pep_tp = [
+            i for i in investigations
+            if i["classification"] == "TRUE_POSITIVE"
+            and i.get("alert", {}).get("match_type") == "PEP"
+        ]
+        other_tp = [
+            i for i in investigations
+            if i["classification"] == "TRUE_POSITIVE"
+            and i.get("alert", {}).get("match_type") not in ("SANCTIONS", "PEP")
+        ]
+
+        # REJECT: confirmed on a government sanctions list — factual, direct evidence
+        if sanctions_tp:
             return "REJECT", True
-        if true_positives:
+
+        # ESCALATE: PEP alert confirmed, adverse media, or other unresolved TP
+        if pep_tp or other_tp:
             return "ESCALATE_TO_MLRO", False
+        if is_pep and adverse_count > 0:
+            return "ESCALATE_TO_MLRO", False
+
+        # No hits path — follow risk band
         if total_hits == 0 and risk_level == "LOW" and not is_pep:
             return "APPROVE", False
         if total_hits == 0 and risk_level == "MEDIUM" and not is_pep:
             return "APPROVE_WITH_CONDITIONS", False
-        if is_pep or risk_level == "HIGH" or adverse_count > 0:
+        if total_hits == 0 and is_pep:
+            # PEP with no hits — cleared but needs conditions
+            return "APPROVE_WITH_CONDITIONS", False
+
+        # Residual HIGH risk without hits
+        if risk_level == "HIGH" or adverse_count > 0:
             return "ESCALATE_TO_MLRO", False
+
         return "APPROVE_WITH_CONDITIONS", False
 
     # ------------------------------------------------------------------ #
@@ -76,15 +115,20 @@ class DecisionAgent(BaseAgent):
                 "You are a Chief Compliance Officer making the final AML/KYC decision "
                 "for a customer under review. You must consider all available evidence and "
                 "provide a definitive ruling compliant with HKMA, AMLO, and SFC guidelines.\n\n"
-                "Decision criteria (apply strictly):\n"
-                "- APPROVE: No sanctions hits, no TRUE_POSITIVE alerts, risk LOW, identity verified.\n"
-                "- APPROVE_WITH_CONDITIONS: No sanctions hits, risk MEDIUM or PEP cleared, "
-                "needs enhanced monitoring but no suspicion of ML/TF.\n"
-                "- ESCALATE_TO_MLRO: PEP with adverse media, unresolved HIGH risk, "
-                "ambiguous alert requiring human judgement.\n"
-                "- REJECT: Confirmed TRUE_POSITIVE sanctions match, very high ML/TF suspicion.\n\n"
-                "Important: do NOT escalate a cleared low-risk customer. "
-                "Use APPROVE for clean, low-risk cases with no hits.\n\n"
+                "Decision criteria — apply strictly and literally:\n"
+                "- APPROVE: No sanctions/PEP hits, risk LOW, identity clean. "
+                "Do NOT escalate a cleared low-risk customer.\n"
+                "- APPROVE_WITH_CONDITIONS: No hits but risk MEDIUM, or PEP confirmed cleared "
+                "with no adverse media. Relationship permitted with enhanced monitoring.\n"
+                "- ESCALATE_TO_MLRO: TRUE_POSITIVE on a PEP list, unresolved HIGH risk, "
+                "adverse media present, or ambiguous alert requiring human judgement. "
+                "Do NOT use this for clearly clean low-risk cases.\n"
+                "- REJECT: Use ONLY when a customer is a TRUE_POSITIVE match on a GOVERNMENT "
+                "SANCTIONS LIST (UN Security Council, OFAC SDN, EU Consolidated, HKMA). "
+                "This is a factual finding, not a judgement call. "
+                "Do NOT reject based on risk level or adverse media alone.\n\n"
+                "Important: REJECT ≠ high risk. REJECT means confirmed on a sanctions list. "
+                "High risk without a sanctions match = ESCALATE_TO_MLRO.\n\n"
                 "Respond ONLY in JSON (no commentary outside JSON):\n"
                 '{"decision": "APPROVE|APPROVE_WITH_CONDITIONS|ESCALATE_TO_MLRO|REJECT", '
                 '"rationale": "...", "requires_str": true/false, '

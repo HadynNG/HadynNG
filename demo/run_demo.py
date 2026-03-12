@@ -25,7 +25,7 @@ from rich.prompt import Confirm, Prompt
 from rich.rule import Rule
 from rich.table import Table
 
-from orchestrator import MissionExecutor
+from orchestrator import IntentParser, MissionExecutor
 from tools.crm_tool import CRMTool
 
 console = Console()
@@ -89,16 +89,50 @@ def _show_customer_table(record: dict, title: str = "Customer Profile to Screen"
 
 def collect_customer_input() -> dict:
     """
-    Ask for the customer's full name, search the CRM for a matching record,
-    and build the mission payload — no manual data entry required.
+    Accept a free-form user prompt, parse intent against the KYC SOP,
+    look up the customer in the CRM, and build the mission payload.
     """
+    parser = IntentParser(model=MODEL, ollama_host=OLLAMA_HOST)
+
+    # ── Free-form prompt loop ─────────────────────────────────────────────────
     console.print()
-    console.print(Rule("[bold cyan]NEW CUSTOMER — KYC SCREENING REQUEST[/bold cyan]", style="cyan"))
+    console.print(Rule("[bold cyan]KYC SCREENING REQUEST[/bold cyan]", style="cyan"))
     console.print(
-        "[dim]Enter the customer's full name. The system will look up their record automatically.[/dim]\n"
+        "[dim]Describe the customer you want to screen in plain language.\n"
+        "Examples:\n"
+        "  • 'Screen James Wong for new account onboarding'\n"
+        "  • 'Run KYC on Valeria Petrov — suspicious wire transfer'\n"
+        "  • 'Periodic review needed for Senator Marcus Delgado'[/dim]\n"
     )
 
-    full_name = Prompt.ask("[bold]Customer full name[/bold]")
+    intent = None
+    while True:
+        raw = Prompt.ask("[bold]Your request[/bold]")
+        intent = parser.parse(raw)
+
+        if intent["is_kyc_request"]:
+            console.print(
+                f"\n  [green]✓ KYC request recognised[/green] — "
+                f"Subject: [bold]{intent['customer_name']}[/bold]  "
+                f"Event: [dim]{intent['event_type']}[/dim]"
+            )
+            if intent["notes"]:
+                console.print(f"  [dim]Context: {intent['notes']}[/dim]")
+            break
+        else:
+            console.print(
+                f"\n  [yellow]⚠  This does not appear to be a KYC screening request.[/yellow]"
+            )
+            if intent["decline_reason"]:
+                console.print(f"  [dim]{intent['decline_reason']}[/dim]")
+            console.print(
+                "  [dim]Please describe a customer to screen "
+                "(e.g. 'Screen John Smith for onboarding').[/dim]\n"
+            )
+
+    full_name = intent["customer_name"]
+    event_type = intent["event_type"]
+    notes = intent["notes"]
 
     # ── Search CRM ───────────────────────────────────────────────────────────
     matches = CRMTool.search_by_name(full_name)
@@ -173,18 +207,6 @@ def collect_customer_input() -> dict:
             "existing_risk_rating": "UNKNOWN",
         }
         CRMTool.register_customer(customer_record)
-
-    # ── Event metadata ────────────────────────────────────────────────────────
-    console.print()
-    event_type = Prompt.ask(
-        "[bold]Event type[/bold]",
-        choices=["onboarding", "transaction_alert", "customer_update", "periodic_review"],
-        default="onboarding",
-    )
-    notes = Prompt.ask(
-        "[bold]Additional context / notes[/bold] [dim](optional)[/dim]",
-        default="",
-    )
 
     # ── Final confirmation ────────────────────────────────────────────────────
     confirmed = Confirm.ask("\n[bold]Start KYC screening?[/bold]", default=True)
