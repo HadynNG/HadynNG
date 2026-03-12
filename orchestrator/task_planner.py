@@ -21,7 +21,7 @@ console = Console()
 AVAILABLE_AGENTS = [
     "DataCollectionAgent",    # Steps 1.1–1.3
     "RiskAssessmentAgent",    # Step  2.1
-    "ScreeningAgent",         # Steps 3.1–3.2
+    "AereveScreeningAgent",         # Steps 3.1–3.2
     "AlertReviewAgent",       # Steps 4.1–4.3
     "DecisionAgent",          # Steps 5.1–5.3
     "DocumentationAgent",     # Steps 6.1–6.2
@@ -40,7 +40,7 @@ Your role:
 Available agents and their responsibilities:
 - DataCollectionAgent   : Receive event, collect customer data, verify identity (Steps 1.1–1.3)
 - RiskAssessmentAgent   : Calculate initial risk score and categorise (Step 2.1)
-- ScreeningAgent        : Generate name variants, run sanctions/PEP screening (Steps 3.1–3.2)
+- AereveScreeningAgent        : Generate name variants, run sanctions/PEP screening (Steps 3.1–3.2)
 - AlertReviewAgent      : Triage alerts, investigate matches (LLM), run EDD (Steps 4.1–4.3)
 - DecisionAgent         : Final compliance decision, MLRO escalation, STR filing (Steps 5.1–5.3)
 - DocumentationAgent    : Audit logging, stakeholder notifications (Steps 6.1–6.2)

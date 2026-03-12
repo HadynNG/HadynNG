@@ -92,7 +92,7 @@ This keeps LLM calls fast and targeted, and ensures the pipeline does not fail d
               │  ┌─────────────────────────────────────────┐    │
               │  │  1. DataCollectionAgent   (Steps 1.1–3)  │    │
               │  │  2. RiskAssessmentAgent   (Step  2.1)    │    │
-              │  │  3. ScreeningAgent        (Steps 3.1–2)  │    │
+              │  │  3. AereveScreeningAgent        (Steps 3.1–2)  │    │
               │  │  4. AlertReviewAgent      (Steps 4.1–3)  │◄── LLM
               │  │  5. DecisionAgent         (Steps 5.1–3)  │◄── LLM
               │  │  6. DocumentationAgent    (Steps 6.1–2)  │    │
@@ -125,7 +125,7 @@ context = {
   "risk_level": "LOW",
   "risk_narrative": "Customer presents low inherent risk...",
 
-  # Written by ScreeningAgent
+  # Written by AereveScreeningAgent
   "screening_results": { "total_hits": 0, "hits": [] },
   "adverse_media": [],
 
@@ -236,8 +236,8 @@ See Section 7 for UI integration guidance.
 | 1.3 Verify identity | DataCollectionAgent | Registry check | ❌ | IdentityTool |
 | 2.1 Risk score | RiskAssessmentAgent | Rules engine | ❌ | — |
 | 2.1 Risk narrative | RiskAssessmentAgent | LLM narrative | ✅ | — |
-| 3.1 Query prep | ScreeningAgent | Name variants | ❌ | — |
-| 3.2 Screening | ScreeningAgent | Database search | ❌ | ScreeningTool |
+| 3.1 Query prep | AereveScreeningAgent | Name variants | ❌ | — |
+| 3.2 Screening | AereveScreeningAgent | Database search | ❌ | ScreeningTool |
 | 4.1 Triage | AlertReviewAgent | Rule-based sort | ❌ | — |
 | 4.2 Investigate | AlertReviewAgent | Evidence analysis | ✅ | — |
 | 4.3 EDD | AlertReviewAgent | Report generation | ✅ | — |

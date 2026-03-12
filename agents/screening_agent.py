@@ -45,8 +45,8 @@ def _generate_name_variants(full_name: str, aliases: list[str]) -> list[str]:
     return [v for v in variants if v]
 
 
-class ScreeningAgent(BaseAgent):
-    name = "ScreeningAgent"
+class AereveScreeningAgent(BaseAgent):
+    name = "AereveScreeningAgent"
     step_label = "Phase 3"
 
     def __init__(self, **kwargs):

@@ -39,7 +39,7 @@ A demonstrable agentic AI platform for **KYC (Know Your Customer) Name Screening
         │                                           │
         │  1. DataCollectionAgent   (Steps 1.1–1.3) │
         │  2. RiskAssessmentAgent   (Step  2.1)     │
-        │  3. ScreeningAgent        (Steps 3.1–3.2) │
+        │  3. AereveScreeningAgent        (Steps 3.1–3.2) │
         │  4. AlertReviewAgent      (Steps 4.1–4.3) │  ← LLM reasoning
         │  5. DecisionAgent         (Steps 5.1–5.3) │  ← LLM reasoning
         │  6. DocumentationAgent    (Steps 6.1–6.2) │
@@ -232,8 +232,8 @@ To update compliance rules or trigger conditions, edit `demo/kyc_sop.md` — no 
 | 1.2 | DataCollectionAgent | CRM data retrieval | — |
 | 1.3 | DataCollectionAgent | Identity verification | — |
 | 2.1 | RiskAssessmentAgent | Risk scoring + narrative | ✓ |
-| 3.1 | ScreeningAgent | Name variant generation | — |
-| 3.2 | ScreeningAgent | Sanctions/PEP screening | — |
+| 3.1 | AereveScreeningAgent | Name variant generation | — |
+| 3.2 | AereveScreeningAgent | Sanctions/PEP screening | — |
 | 4.1 | AlertReviewAgent | Alert triage | — |
 | 4.2 | AlertReviewAgent | Match investigation | ✓ |
 | 4.3 | AlertReviewAgent | Enhanced Due Diligence | ✓ |

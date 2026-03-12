@@ -108,6 +108,12 @@ def collect_customer_input() -> dict:
     intent = None
     while True:
         raw = Prompt.ask("[bold]Your request[/bold]")
+
+        # Allow graceful exit from the prompt
+        if raw.strip().lower() in ("quit", "exit", "q", "bye"):
+            console.print("[dim]Goodbye.[/dim]")
+            sys.exit(0)
+
         intent = parser.parse(raw)
 
         if intent["is_kyc_request"]:
@@ -127,7 +133,7 @@ def collect_customer_input() -> dict:
                 console.print(f"  [dim]{intent['decline_reason']}[/dim]")
             console.print(
                 "  [dim]Please describe a customer to screen "
-                "(e.g. 'Screen John Smith for onboarding').[/dim]\n"
+                "(e.g. 'Screen John Smith for onboarding'), or type 'quit' to exit.[/dim]\n"
             )
 
     full_name = intent["customer_name"]
@@ -211,8 +217,8 @@ def collect_customer_input() -> dict:
     # ── Final confirmation ────────────────────────────────────────────────────
     confirmed = Confirm.ask("\n[bold]Start KYC screening?[/bold]", default=True)
     if not confirmed:
-        console.print("[yellow]Screening cancelled.[/yellow]")
-        sys.exit(0)
+        console.print("[yellow]Screening cancelled — returning to main prompt.[/yellow]")
+        return None
 
     # ── Build mission description ─────────────────────────────────────────────
     nat = customer_record.get("nationality", "UNKNOWN")
@@ -262,7 +268,7 @@ def load_preset(name: str) -> dict:
 def main():
     print_welcome()
 
-    # Parse --demo flag
+    # Parse --demo flag (only affects the first iteration)
     demo_flag = None
     args = sys.argv[1:]
     if "--demo" in args:
@@ -275,37 +281,69 @@ def main():
             )
             sys.exit(1)
 
-    if demo_flag:
-        payload = load_preset(demo_flag)
-    else:
-        payload = collect_customer_input()
-
-    expected = payload.pop("_expected", "N/A")
-
+    # Create executor once — reused across all screening runs
     executor = MissionExecutor(model=MODEL, ollama_host=OLLAMA_HOST)
 
-    try:
-        result = executor.execute(payload)
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Demo interrupted by user.[/yellow]")
-        sys.exit(0)
-    except Exception as e:
-        console.print(f"\n[red]Fatal error: {e}[/red]")
-        raise
+    first_run = True
 
-    decision = result.get("final_decision", "N/A")
-    color = {"APPROVE": "green", "APPROVE_WITH_CONDITIONS": "yellow"}.get(decision, "red")
+    # ── Persistent chat loop ──────────────────────────────────────────────────
+    while True:
+        try:
+            # On first iteration use the --demo preset if given, then switch to interactive
+            if first_run and demo_flag:
+                payload = load_preset(demo_flag)
+                first_run = False
+            else:
+                first_run = False
+                payload = collect_customer_input()
+        except (KeyboardInterrupt, SystemExit):
+            console.print("\n[dim]Session ended. Goodbye.[/dim]")
+            return
 
-    console.print(
-        Panel(
-            f"Final Decision : [bold {color}]{decision}[/bold {color}]\n"
-            f"Expected       : {expected}\n"
-            f"Audit Log      : {result.get('audit_log_file', 'N/A')}\n"
-            f"Timeline       : {result.get('timeline_file', 'N/A')}",
-            title="[bold]Demo Complete[/bold]",
-            border_style="magenta",
+        # collect_customer_input returns None when the user cancels — loop back
+        if payload is None:
+            console.print()
+            console.print(Rule("[dim]Ready for next screening request[/dim]", style="dim"))
+            continue
+
+        expected = payload.pop("_expected", "N/A")
+
+        # ── Execute KYC pipeline ──────────────────────────────────────────────
+        try:
+            result = executor.execute(payload)
+        except KeyboardInterrupt:
+            console.print(
+                "\n[yellow]Screening interrupted. Returning to main prompt.[/yellow]"
+            )
+            console.print(Rule("[dim]Ready for next screening request[/dim]", style="dim"))
+            continue
+        except Exception as e:
+            console.print(f"\n[red]Screening error: {e}[/red]")
+            console.print(Rule("[dim]Ready for next screening request[/dim]", style="dim"))
+            continue
+
+        # ── Show result ───────────────────────────────────────────────────────
+        decision = result.get("final_decision", "N/A")
+        color = {"APPROVE": "green", "APPROVE_WITH_CONDITIONS": "yellow"}.get(
+            decision, "red"
         )
-    )
+
+        console.print(
+            Panel(
+                f"Final Decision : [bold {color}]{decision}[/bold {color}]\n"
+                f"Expected       : {expected}\n"
+                f"Audit Log      : {result.get('audit_log_file', 'N/A')}\n"
+                f"Timeline       : {result.get('timeline_file', 'N/A')}",
+                title="[bold]Screening Complete[/bold]",
+                border_style="magenta",
+            )
+        )
+
+        # ── Loop back — ready for next request ────────────────────────────────
+        console.print()
+        console.print(
+            Rule("[dim]Ready for next screening request  •  type 'quit' to exit[/dim]", style="dim")
+        )
 
 
 if __name__ == "__main__":

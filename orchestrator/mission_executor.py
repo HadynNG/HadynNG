@@ -26,7 +26,7 @@ from agents import (
     DecisionAgent,
     DocumentationAgent,
     RiskAssessmentAgent,
-    ScreeningAgent,
+    AereveScreeningAgent,
 )
 
 console = Console()
@@ -35,7 +35,7 @@ console = Console()
 AGENT_REGISTRY = {
     "DataCollectionAgent": DataCollectionAgent,
     "RiskAssessmentAgent": RiskAssessmentAgent,
-    "ScreeningAgent": ScreeningAgent,
+    "AereveScreeningAgent": AereveScreeningAgent,
     "AlertReviewAgent": AlertReviewAgent,
     "DecisionAgent": DecisionAgent,
     "DocumentationAgent": DocumentationAgent,
@@ -45,7 +45,7 @@ AGENT_REGISTRY = {
 PIPELINE_ORDER = [
     "DataCollectionAgent",
     "RiskAssessmentAgent",
-    "ScreeningAgent",
+    "AereveScreeningAgent",
     "AlertReviewAgent",
     "DecisionAgent",
     "DocumentationAgent",
@@ -273,7 +273,7 @@ class MissionExecutor:
                 f"Risk level: {context.get('risk_level', '?')} "
                 f"(score: {context.get('risk_score', '?')})"
             ),
-            "ScreeningAgent": (
+            "AereveScreeningAgent": (
                 f"{context.get('screening_results', {}).get('total_hits', 0)} hit(s) found — "
                 f"{len(context.get('adverse_media', []))} adverse media item(s)"
             ),
@@ -304,7 +304,7 @@ class MissionExecutor:
                 "risk_level": context.get("risk_level"),
                 "risk_score": context.get("risk_score"),
             },
-            "ScreeningAgent": {
+            "AereveScreeningAgent": {
                 "total_hits": context.get("screening_results", {}).get("total_hits", 0),
                 "adverse_media_count": len(context.get("adverse_media", [])),
                 "lists_checked": context.get("screening_results", {}).get("lists_checked", []),

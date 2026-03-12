@@ -13,7 +13,7 @@ File schema:
   "model": "...",
   "started_at": "<ISO-8601>",
   "status": "IN_PROGRESS" | "COMPLETE" | "FAILED",
-  "current_phase": "ScreeningAgent",
+  "current_phase": "AereveScreeningAgent",
   "progress_pct": 50,
   "phases": [
     {
@@ -89,7 +89,7 @@ _PHASES = [
         "sequence": 3,
         "phase_id": "screening",
         "label": "Name Screening",
-        "agent": "ScreeningAgent",
+        "agent": "AereveScreeningAgent",
         "substeps": [
             {"id": "3.1", "label": "Query Variant Generation"},
             {"id": "3.2", "label": "Sanctions / PEP Database Screening"},
