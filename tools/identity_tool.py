@@ -1,65 +1,49 @@
 """
-Mock Identity Verification Tool — simulates Jumio/Onfido-style API.
-Verifies documents against government registries.
+Identity Verification Tool — document verification against government registries.
+
+Static data is loaded from:
+  data/identity_registry.md  — pre-configured verification outcomes
+
+Simulates Jumio / Onfido-style API.
+Unknown IDs receive a simulated fallback result so the pipeline never halts
+on a demo customer that was entered at runtime.
 """
+
 from datetime import datetime
-import random
+
+from tools.md_loader import load, parse_table
 
 
-# Simulated verification outcomes
-_VERIFICATION_RESULTS = {
-    "A123456(7)": {
-        "status": "VERIFIED",
-        "id_type": "HKID",
-        "id_number": "A123456(7)",
-        "name_match": True,
-        "dob_match": True,
-        "document_authentic": True,
-        "registry_source": "HKSAR Immigration Department",
-        "verification_confidence": 0.98,
-    },
-    "PH987654321": {
-        "status": "VERIFIED",
-        "id_type": "PASSPORT",
-        "id_number": "PH987654321",
-        "name_match": True,
-        "dob_match": True,
-        "document_authentic": True,
-        "registry_source": "Philippine Bureau of Immigration",
-        "verification_confidence": 0.95,
-    },
-    "RU20190045678": {
-        "status": "VERIFIED",
-        "id_type": "PASSPORT",
-        "id_number": "RU20190045678",
-        "name_match": True,
-        "dob_match": True,
-        "document_authentic": True,
-        "registry_source": "Russian Federal Migration Service",
-        "verification_confidence": 0.91,
-        "notes": "Document verified but jurisdiction flagged",
-    },
-    "B654321(2)": {
-        "status": "VERIFIED",
-        "id_type": "HKID",
-        "id_number": "B654321(2)",
-        "name_match": True,
-        "dob_match": True,
-        "document_authentic": True,
-        "registry_source": "HKSAR Immigration Department",
-        "verification_confidence": 0.97,
-    },
-}
+# ── Loader ────────────────────────────────────────────────────────────────────
 
+def _load_verification_results() -> dict:
+    rows = parse_table(load("identity_registry.md"))
+    db = {}
+    for row in rows:
+        for bool_field in ("name_match", "dob_match", "document_authentic"):
+            row[bool_field] = row.get(bool_field, "true").lower() == "true"
+        row["verification_confidence"] = float(row.get("verification_confidence", "0.80"))
+        # Drop empty notes so callers can use .get("notes") cleanly
+        if not row.get("notes"):
+            row.pop("notes", None)
+        db[row["id_number"]] = row
+    return db
+
+
+# Load once at import time
+_VERIFICATION_RESULTS = _load_verification_results()
+
+
+# ── Tool class ────────────────────────────────────────────────────────────────
 
 class IdentityVerificationTool:
-    """Mock identity verification against government registries."""
+    """Identity verification tool — reads from data/identity_registry.md."""
 
     def verify_identity(self, id_number: str, full_name: str, dob: str) -> dict:
         if id_number in _VERIFICATION_RESULTS:
             result = dict(_VERIFICATION_RESULTS[id_number])
         elif id_number.upper().startswith("DEMO-") or not id_number:
-            # Demo / user-entered customer — simulate a standard verification pass
+            # User-entered demo customer — simulate a standard pass
             result = {
                 "status": "VERIFIED",
                 "id_type": "DEMO",
@@ -72,7 +56,7 @@ class IdentityVerificationTool:
                 "notes": "Simulated verification for demo customer",
             }
         else:
-            # Unknown real-world ID — simulate a generic verification
+            # Unrecognised real-world ID — generic simulated pass
             result = {
                 "status": "VERIFIED",
                 "id_type": "UNKNOWN",
@@ -91,7 +75,7 @@ class IdentityVerificationTool:
         return result
 
     def verify_beneficial_owner_structure(self, entity_name: str) -> dict:
-        """For corporate entities — check ownership structure."""
+        """For corporate entities — check UBO structure."""
         return {
             "entity": entity_name,
             "registry_checked": "HK Companies Registry",
