@@ -22,6 +22,38 @@ class DecisionAgent(BaseAgent):
     # Step 5.1 — Classify and Decide                                       #
     # ------------------------------------------------------------------ #
 
+    # ------------------------------------------------------------------ #
+    # Rule-based decision fallback (used when LLM output cannot be parsed) #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _rule_based_decision(context: dict) -> tuple[str, bool]:
+        """
+        Returns (decision, requires_str) based on hard rules.
+        Used as primary anchor when LLM JSON is unparseable.
+        """
+        risk_level = context.get("risk_level", "LOW")
+        investigations = context.get("investigation_results", [])
+        true_positives = [i for i in investigations if i["classification"] == "TRUE_POSITIVE"]
+        customer = context.get("customer_data", {})
+        is_pep = customer.get("pep_self_declared", False)
+        total_hits = context.get("screening_results", {}).get("total_hits", 0)
+        adverse_count = len(context.get("adverse_media", []))
+
+        if true_positives and risk_level == "HIGH":
+            return "REJECT", True
+        if true_positives:
+            return "ESCALATE_TO_MLRO", False
+        if total_hits == 0 and risk_level == "LOW" and not is_pep:
+            return "APPROVE", False
+        if total_hits == 0 and risk_level == "MEDIUM" and not is_pep:
+            return "APPROVE_WITH_CONDITIONS", False
+        if is_pep or risk_level == "HIGH" or adverse_count > 0:
+            return "ESCALATE_TO_MLRO", False
+        return "APPROVE_WITH_CONDITIONS", False
+
+    # ------------------------------------------------------------------ #
+
     def _step_5_1(self, context: dict) -> dict:
         self._print_step_header(
             "Classify & Decide",
@@ -36,18 +68,26 @@ class DecisionAgent(BaseAgent):
         false_positives = [i for i in investigations if i["classification"] == "FALSE_POSITIVE"]
         no_hits = not investigations and not context["screening_results"]["hits"]
 
+        # Compute rule-based anchor first
+        rule_decision, rule_requires_str = self._rule_based_decision(context)
+
         thinking, response = self._llm_reason(
             system_prompt=(
                 "You are a Chief Compliance Officer making the final AML/KYC decision "
                 "for a customer under review. You must consider all available evidence and "
                 "provide a definitive ruling compliant with HKMA, AMLO, and SFC guidelines.\n\n"
-                "Possible decisions:\n"
-                "- APPROVE: Customer cleared, low/no risk. Proceed with relationship.\n"
-                "- APPROVE_WITH_CONDITIONS: Cleared but requires enhanced monitoring.\n"
-                "- ESCALATE_TO_MLRO: Suspicious findings requiring MLRO review.\n"
-                "- REJECT: Confirmed sanctions match or unacceptable risk.\n\n"
-                "Respond in JSON:\n"
-                '{"decision": "...", "rationale": "...", "requires_str": true/false, '
+                "Decision criteria (apply strictly):\n"
+                "- APPROVE: No sanctions hits, no TRUE_POSITIVE alerts, risk LOW, identity verified.\n"
+                "- APPROVE_WITH_CONDITIONS: No sanctions hits, risk MEDIUM or PEP cleared, "
+                "needs enhanced monitoring but no suspicion of ML/TF.\n"
+                "- ESCALATE_TO_MLRO: PEP with adverse media, unresolved HIGH risk, "
+                "ambiguous alert requiring human judgement.\n"
+                "- REJECT: Confirmed TRUE_POSITIVE sanctions match, very high ML/TF suspicion.\n\n"
+                "Important: do NOT escalate a cleared low-risk customer. "
+                "Use APPROVE for clean, low-risk cases with no hits.\n\n"
+                "Respond ONLY in JSON (no commentary outside JSON):\n"
+                '{"decision": "APPROVE|APPROVE_WITH_CONDITIONS|ESCALATE_TO_MLRO|REJECT", '
+                '"rationale": "...", "requires_str": true/false, '
                 '"monitoring_requirements": "...", "confidence": 0.0-1.0}'
             ),
             user_prompt=(
@@ -67,12 +107,22 @@ class DecisionAgent(BaseAgent):
                     f"EDD Report Summary: {context.get('edd_report', 'N/A')[:300]}"
                     if edd_required else ""
                 )
+                + f"\n\nRule-based recommendation: {rule_decision}"
                 + "\n\nMake the final compliance decision."
             ),
         )
 
         parsed = self._extract_json(response)
-        decision = parsed.get("decision", "ESCALATE_TO_MLRO")
+        llm_decision = parsed.get("decision", "")
+
+        # Validate LLM decision — fall back to rule-based if invalid or absent
+        valid_decisions = {"APPROVE", "APPROVE_WITH_CONDITIONS", "ESCALATE_TO_MLRO", "REJECT"}
+        if llm_decision not in valid_decisions:
+            parsed["decision"] = rule_decision
+            parsed.setdefault("requires_str", rule_requires_str)
+            parsed.setdefault("rationale", f"Rule-based decision: {rule_decision}")
+
+        decision = parsed["decision"]
         requires_str = parsed.get("requires_str", False)
 
         decision_colors = {
@@ -114,7 +164,7 @@ class DecisionAgent(BaseAgent):
 
     def _step_5_2(self, context: dict) -> dict:
         decision = context.get("final_decision", "")
-        needs_escalation = decision in ("ESCALATE_TO_MLRO", "REJECT") or context.get("edd_required")
+        needs_escalation = decision in ("ESCALATE_TO_MLRO", "REJECT")
 
         if not needs_escalation:
             context["step_5_2"] = {"escalated": False, "timestamp": datetime.utcnow().isoformat() + "Z"}

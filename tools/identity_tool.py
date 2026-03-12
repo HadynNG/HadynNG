@@ -39,6 +39,16 @@ _VERIFICATION_RESULTS = {
         "verification_confidence": 0.91,
         "notes": "Document verified but jurisdiction flagged",
     },
+    "B654321(2)": {
+        "status": "VERIFIED",
+        "id_type": "HKID",
+        "id_number": "B654321(2)",
+        "name_match": True,
+        "dob_match": True,
+        "document_authentic": True,
+        "registry_source": "HKSAR Immigration Department",
+        "verification_confidence": 0.97,
+    },
 }
 
 

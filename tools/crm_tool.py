@@ -72,6 +72,26 @@ _CRM_DB = {
         "existing_risk_rating": "HIGH",
         "last_reviewed": "2024-02-20",
     },
+    "C004": {
+        "customer_id": "C004",
+        "full_name": "Li Wei Chen",
+        "aliases": ["Wei Chen Li", "Li W. Chen"],
+        "date_of_birth": "1990-06-15",
+        "nationality": "HKG",
+        "id_type": "HKID",
+        "id_number": "B654321(2)",
+        "address": "Flat 8A, Pacific Place, 88 Queensway, Hong Kong",
+        "email": "liwei.chen@finance.hk",
+        "phone": "+852 6123 9900",
+        "customer_type": "individual",
+        "occupation": "Financial Consultant",
+        "employer": "Asia Capital Advisors Ltd",
+        "account_opened": "2024-08-10",
+        "jurisdiction": "HKG",
+        "pep_self_declared": False,
+        "existing_risk_rating": "HIGH",  # elevated from prior activity — triggers +20 scoring pts → MEDIUM band
+        "last_reviewed": "2024-08-10",
+    },
 }
 
 # High-risk jurisdictions per FATF
@@ -131,6 +151,42 @@ class CRMTool:
             "risk_level": level,
             "reason": reason,
         }
+
+    @staticmethod
+    def search_by_name(name: str) -> list[dict]:
+        """
+        Search all customers by name similarity.
+        Returns list of matching customer records sorted by match score (best first).
+        """
+        from difflib import SequenceMatcher
+
+        name_lower = name.strip().lower()
+        results = []
+        all_customers = {**_CRM_DB, **_RUNTIME_CUSTOMERS}
+
+        for customer_id, record in all_customers.items():
+            full_name = record.get("full_name", "").lower()
+            aliases = [a.lower() for a in record.get("aliases", [])]
+
+            seq_score = SequenceMatcher(None, name_lower, full_name).ratio()
+            alias_score = max(
+                (SequenceMatcher(None, name_lower, a).ratio() for a in aliases),
+                default=0,
+            )
+            best_score = max(seq_score, alias_score)
+
+            # Token-overlap boost (handles partial name matches)
+            query_tokens = set(name_lower.split())
+            name_tokens = set(full_name.split())
+            if query_tokens and name_tokens:
+                token_overlap = len(query_tokens & name_tokens) / len(query_tokens | name_tokens)
+                best_score = max(best_score, token_overlap)
+
+            if best_score >= 0.45:
+                results.append({**record, "_match_score": round(best_score, 3)})
+
+        results.sort(key=lambda x: x["_match_score"], reverse=True)
+        return results
 
     def check_existing_records(self, customer_id: str) -> dict:
         customer = self.get_customer(customer_id)

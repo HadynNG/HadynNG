@@ -1,0 +1,10 @@
+{
+  "customer_id": "C004",
+  "event": {
+    "event_type": "periodic_review",
+    "trigger_source": "compliance_scheduler",
+    "triggered_at": "2024-08-10T10:00:00Z",
+    "notes": "Scheduled 12-month periodic review. Previous rating was elevated due to complex transaction patterns. No sanctions or PEP indicators."
+  },
+  "mission_description": "Perform full KYC name screening for individual customer C004 (Li Wei Chen, HKG national) during scheduled periodic review. Customer is a financial consultant whose prior risk rating was elevated due to complex transaction patterns. No self-declared PEP status. Verify identity, re-assess risk, screen against all applicable sanctions and PEP lists, and make an approval decision per HKMA and AMLO requirements."
+}

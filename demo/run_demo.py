@@ -3,10 +3,11 @@
 KYC Agentic Platform — Demo Runner
 
 Usage:
-    python demo/run_demo.py                    # interactive: enter customer details
-    python demo/run_demo.py --demo clean       # quick preset: low-risk HK individual
-    python demo/run_demo.py --demo pep         # quick preset: Philippine senator (PEP)
-    python demo/run_demo.py --demo sanctioned  # quick preset: sanctioned Russian exec
+    python demo/run_demo.py                    # interactive: enter customer name → CRM lookup
+    python demo/run_demo.py --demo clean       # APPROVE      : low-risk HK individual
+    python demo/run_demo.py --demo medium      # APPROVE_WITH_CONDITIONS : medium-risk customer
+    python demo/run_demo.py --demo pep         # ESCALATE_TO_MLRO : Philippine PEP senator
+    python demo/run_demo.py --demo sanctioned  # REJECT       : sanctioned Russian executive
 """
 
 import json
@@ -18,7 +19,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from rich.columns import Columns
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
@@ -34,46 +34,19 @@ console = Console()
 OLLAMA_HOST = "http://localhost:11434"
 MODEL = "qwen3.5:9b"
 
-# ── Country name → ISO-3 code helpers ────────────────────────────────────────
-_COUNTRY_MAP = {
-    "hong kong": "HKG", "hk": "HKG",
-    "china": "CHN", "prc": "CHN",
-    "usa": "USA", "united states": "USA", "us": "USA", "america": "USA",
-    "uk": "GBR", "united kingdom": "GBR", "britain": "GBR",
-    "russia": "RUS", "russian federation": "RUS",
-    "philippines": "PHL", "ph": "PHL",
-    "singapore": "SGP", "sg": "SGP",
-    "taiwan": "TWN",
-    "japan": "JPN",
-    "south korea": "KOR", "korea": "KOR",
-    "australia": "AUS",
-    "canada": "CAN",
-    "germany": "DEU",
-    "france": "FRA",
-    "iran": "IRN",
-    "north korea": "PRK",
-    "syria": "SYR",
-    "myanmar": "MMR",
-    "pakistan": "PAK",
-    "ukraine": "UKR",
-}
-
-def _resolve_nationality(raw: str) -> str:
-    """Convert country name or code to ISO-3. Returns uppercased input if unknown."""
-    normalised = raw.strip().lower()
-    return _COUNTRY_MAP.get(normalised, raw.strip().upper()[:3])
-
 
 # ── Preset demo cases ─────────────────────────────────────────────────────────
 _PRESETS = {
-    "clean": ROOT / "demo" / "cases" / "case_clean.json",
-    "pep":   ROOT / "demo" / "cases" / "case_pep.json",
-    "sanctioned": ROOT / "demo" / "cases" / "case_sanctioned.json",
+    "clean":       ROOT / "demo" / "cases" / "case_clean.json",
+    "medium":      ROOT / "demo" / "cases" / "case_medium_risk.json",
+    "pep":         ROOT / "demo" / "cases" / "case_pep.json",
+    "sanctioned":  ROOT / "demo" / "cases" / "case_sanctioned.json",
 }
 _PRESET_EXPECTED = {
     "clean":      "APPROVE",
-    "pep":        "APPROVE_WITH_CONDITIONS or ESCALATE_TO_MLRO",
-    "sanctioned": "REJECT or ESCALATE_TO_MLRO",
+    "medium":     "APPROVE_WITH_CONDITIONS",
+    "pep":        "ESCALATE_TO_MLRO",
+    "sanctioned": "REJECT",
 }
 
 
@@ -102,63 +75,104 @@ def print_welcome():
 
 
 # ── Interactive customer input ────────────────────────────────────────────────
+def _show_customer_table(record: dict, title: str = "Customer Profile to Screen"):
+    table = Table(title=title, show_header=True, header_style="bold cyan")
+    table.add_column("Field", style="dim", width=24)
+    table.add_column("Value")
+    skip = {"customer_id", "aliases", "email", "phone", "_match_score"}
+    for k, v in record.items():
+        if k not in skip:
+            table.add_row(str(k).replace("_", " ").title(), str(v))
+    console.print(table)
+    console.print(f"  [dim]Customer ID: {record['customer_id']}[/dim]\n")
+
+
 def collect_customer_input() -> dict:
     """
-    Interactively collect customer details from the user and return
-    a mission_payload dict ready for MissionExecutor.
+    Ask for the customer's full name, search the CRM for a matching record,
+    and build the mission payload — no manual data entry required.
     """
     console.print()
     console.print(Rule("[bold cyan]NEW CUSTOMER — KYC SCREENING REQUEST[/bold cyan]", style="cyan"))
     console.print(
-        "[dim]Enter the details of the customer you want to screen.\n"
-        "Press Enter to accept the default where shown in brackets.[/dim]\n"
+        "[dim]Enter the customer's full name. The system will look up their record automatically.[/dim]\n"
     )
 
-    # ── Core identity fields ──────────────────────────────────────────────────
-    full_name = Prompt.ask("[bold]Full name[/bold]")
+    full_name = Prompt.ask("[bold]Customer full name[/bold]")
 
-    dob_raw = Prompt.ask(
-        "[bold]Date of birth[/bold] [dim](YYYY-MM-DD)[/dim]",
-        default="",
-    )
-    dob = dob_raw.strip() or "1980-01-01"
+    # ── Search CRM ───────────────────────────────────────────────────────────
+    matches = CRMTool.search_by_name(full_name)
 
-    nat_raw = Prompt.ask(
-        "[bold]Nationality[/bold] [dim](country name or ISO-3 code, e.g. HKG, RUS, USA)[/dim]",
-        default="HKG",
-    )
-    nationality = _resolve_nationality(nat_raw)
+    customer_id: str
+    customer_record: dict
 
-    id_type = Prompt.ask(
-        "[bold]ID type[/bold]",
-        choices=["HKID", "PASSPORT", "NID", "OTHER"],
-        default="PASSPORT",
-    )
-    id_number = Prompt.ask(
-        "[bold]ID number[/bold]",
-        default=f"DEMO-{uuid.uuid4().hex[:8].upper()}",
-    )
+    if matches:
+        best = matches[0]
+        console.print()
+        if len(matches) == 1 or best["_match_score"] >= 0.80:
+            # Confident single match — confirm with user
+            console.print(
+                f"  [green]Found matching record (confidence: {best['_match_score']:.0%})[/green]"
+            )
+            _show_customer_table(best, "Matched Customer Record")
+            confirmed = Confirm.ask(
+                "[bold]Is this the correct customer?[/bold]", default=True
+            )
+            if confirmed:
+                customer_id = best["customer_id"]
+                customer_record = best
+            else:
+                console.print("[yellow]No matching record used — proceeding with name only.[/yellow]")
+                matches = []  # fall through to new-customer path
+        else:
+            # Multiple plausible matches — let user pick
+            console.print(f"  [yellow]Found {len(matches)} possible matches:[/yellow]\n")
+            for idx, m in enumerate(matches[:4], start=1):
+                console.print(
+                    f"  [{idx}] {m['full_name']}  "
+                    f"({m.get('nationality','?')}, DOB: {m.get('date_of_birth','?')})  "
+                    f"[dim]— {m['_match_score']:.0%} match[/dim]"
+                )
+            console.print(f"  [0] None of these — screen by name only")
+            choice_str = Prompt.ask(
+                "\n  [bold]Select customer[/bold]",
+                choices=[str(i) for i in range(len(matches[:4]) + 1)],
+                default="1",
+            )
+            choice = int(choice_str)
+            if choice == 0:
+                matches = []
+            else:
+                selected = matches[choice - 1]
+                _show_customer_table(selected, "Selected Customer Record")
+                customer_id = selected["customer_id"]
+                customer_record = selected
 
-    # ── Optional enrichment fields ────────────────────────────────────────────
-    occupation = Prompt.ask(
-        "[bold]Occupation[/bold] [dim](optional, press Enter to skip)[/dim]",
-        default="",
-    )
-
-    is_pep = Confirm.ask(
-        "[bold]Is this customer a self-declared PEP[/bold] (Politically Exposed Person)?",
-        default=False,
-    )
-
-    employer = Prompt.ask(
-        "[bold]Employer / company[/bold] [dim](optional, press Enter to skip)[/dim]",
-        default="",
-    )
-
-    address = Prompt.ask(
-        "[bold]Address[/bold] [dim](optional, press Enter to skip)[/dim]",
-        default="",
-    )
+    if not matches:
+        # No CRM record found — screen by name with minimal profile
+        console.print(
+            "\n  [dim]No existing record found. Customer will be screened by name only.[/dim]\n"
+        )
+        customer_id = f"DEMO-{uuid.uuid4().hex[:6].upper()}"
+        customer_record = {
+            "customer_id": customer_id,
+            "full_name": full_name,
+            "aliases": [],
+            "date_of_birth": "UNKNOWN",
+            "nationality": "UNKNOWN",
+            "id_type": "UNKNOWN",
+            "id_number": f"DEMO-{uuid.uuid4().hex[:8].upper()}",
+            "address": "Not provided",
+            "email": "",
+            "phone": "",
+            "customer_type": "individual",
+            "occupation": "Not provided",
+            "employer": "Not provided",
+            "jurisdiction": "UNKNOWN",
+            "pep_self_declared": False,
+            "existing_risk_rating": "UNKNOWN",
+        }
+        CRMTool.register_customer(customer_record)
 
     # ── Event metadata ────────────────────────────────────────────────────────
     console.print()
@@ -167,61 +181,27 @@ def collect_customer_input() -> dict:
         choices=["onboarding", "transaction_alert", "customer_update", "periodic_review"],
         default="onboarding",
     )
-
     notes = Prompt.ask(
         "[bold]Additional context / notes[/bold] [dim](optional)[/dim]",
         default="",
     )
 
-    # ── Build and register customer record ────────────────────────────────────
-    customer_id = f"DEMO-{uuid.uuid4().hex[:6].upper()}"
-
-    customer_record = {
-        "customer_id": customer_id,
-        "full_name": full_name,
-        "aliases": [],
-        "date_of_birth": dob,
-        "nationality": nationality,
-        "id_type": id_type,
-        "id_number": id_number,
-        "address": address or "Not provided",
-        "email": "",
-        "phone": "",
-        "customer_type": "individual",
-        "occupation": occupation or "Not provided",
-        "employer": employer or "Not provided",
-        "jurisdiction": nationality,
-        "pep_self_declared": is_pep,
-        "existing_risk_rating": "UNKNOWN",
-    }
-
-    CRMTool.register_customer(customer_record)
-
-    # ── Show confirmation table ───────────────────────────────────────────────
-    console.print()
-    table = Table(title="Customer Profile to Screen", show_header=True, header_style="bold cyan")
-    table.add_column("Field", style="dim", width=22)
-    table.add_column("Value")
-    for k, v in customer_record.items():
-        if k not in ("customer_id", "aliases", "email", "phone"):
-            table.add_row(str(k).replace("_", " ").title(), str(v))
-    console.print(table)
-    console.print(f"  [dim]Customer ID: {customer_id}[/dim]\n")
-
-    confirmed = Confirm.ask("[bold]Start KYC screening with these details?[/bold]", default=True)
+    # ── Final confirmation ────────────────────────────────────────────────────
+    confirmed = Confirm.ask("\n[bold]Start KYC screening?[/bold]", default=True)
     if not confirmed:
         console.print("[yellow]Screening cancelled.[/yellow]")
         sys.exit(0)
 
     # ── Build mission description ─────────────────────────────────────────────
+    nat = customer_record.get("nationality", "UNKNOWN")
+    is_pep = customer_record.get("pep_self_declared", False)
     pep_note = " The customer is a self-declared PEP." if is_pep else ""
     notes_part = f" Additional context: {notes}" if notes else ""
 
     mission_description = (
-        f"Perform full KYC name screening for {'new' if event_type == 'onboarding' else ''} "
-        f"individual customer {customer_id} ({full_name}, {nationality} national), "
+        f"Perform full KYC name screening for individual customer "
+        f"{customer_id} ({full_name}, {nat} national), "
         f"triggered by a {event_type} event.{pep_note}"
-        f" Occupation: {occupation or 'not provided'}."
         f"{notes_part}"
         f" Verify identity, assess risk, screen against all applicable sanctions and PEP lists, "
         f"and make an approval decision per HKMA and AMLO requirements."
