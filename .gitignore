@@ -18,6 +18,16 @@ env/
 audit_logs/
 timelines/
 
+# Environment
+.env
+
+# Docker volumes
+postgres_data/
+redis_data/
+minio_data/
+qdrant_data/
+ollama_data/
+
 # OS / editor
 .DS_Store
 *.swp

@@ -18,8 +18,13 @@ from rich.console import Console
 
 console = Console()
 
-# Default SOP path (relative to repo root, resolved at runtime)
-_DEFAULT_SOP = Path(__file__).resolve().parent.parent / "demo" / "kyc_sop.md"
+# SOP search paths (new storage location first, then original demo location)
+_ROOT = Path(__file__).resolve().parent.parent
+_SOP_CANDIDATES = [
+    _ROOT / "storage" / "documents" / "sop" / "kyc_sop.md",
+    _ROOT / "demo" / "kyc_sop.md",
+]
+_DEFAULT_SOP = next((p for p in _SOP_CANDIDATES if p.exists()), _SOP_CANDIDATES[-1])
 
 _VALID_EVENT_TYPES = {"onboarding", "transaction_alert", "periodic_review", "customer_update"}
 

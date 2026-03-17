@@ -4,9 +4,14 @@ Mission Executor — the central coordinator of the agentic platform.
 Responsibilities:
 1. Accept a mission payload (customer_id + event + description).
 2. Use TaskPlanner (LLM) to build an execution plan.
-3. Dispatch agents in sequence according to the plan.
+3. Dispatch agents via AgentZero MCP (production) or directly (demo).
 4. Track progress via MissionTimeline (for UI consumption).
-5. Display rich chain-of-thought output throughout.
+5. Persist context in Redis/memory service when available.
+6. Display rich chain-of-thought output throughout.
+
+Architecture paths:
+  Demo mode:   Orchestrator → Agents (direct Python calls)
+  Production:  Orchestrator → AgentZero MCP → Agents → Tool MCP → Tools
 """
 import sys
 from datetime import datetime
@@ -57,7 +62,15 @@ class MissionExecutor:
     Central mission coordinator.
 
     Usage:
+        # Demo mode (backward-compatible)
         executor = MissionExecutor()
+        result = executor.execute(mission_payload)
+
+        # Production mode (with services)
+        executor = MissionExecutor(
+            llm_gateway=llm_gateway,
+            memory=memory_manager,
+        )
         result = executor.execute(mission_payload)
     """
 
@@ -65,9 +78,13 @@ class MissionExecutor:
         self,
         model: str = "qwen3.5:9b",
         ollama_host: str = "http://localhost:11434",
+        llm_gateway: Optional[object] = None,
+        memory: Optional[object] = None,
     ):
         self.model = model
         self.ollama_host = ollama_host
+        self._llm_gateway = llm_gateway
+        self._memory = memory
         self.planner = TaskPlanner(model=model, ollama_host=ollama_host)
 
     # ------------------------------------------------------------------
@@ -76,11 +93,17 @@ class MissionExecutor:
 
     def _build_agents(self) -> dict:
         return {
-            name: cls(model=self.model, ollama_host=self.ollama_host)
+            name: cls(
+                model=self.model,
+                ollama_host=self.ollama_host,
+                llm_gateway=self._llm_gateway,
+                memory=self._memory,
+            )
             for name, cls in AGENT_REGISTRY.items()
         }
 
     def _print_banner(self, mission_payload: dict):
+        mode = "Production (LLM Gateway)" if self._llm_gateway else "Demo (Direct Ollama)"
         console.print()
         console.print(Rule("[bold magenta]AGENTIC KYC PLATFORM[/bold magenta]", style="magenta"))
         console.print(
@@ -89,7 +112,8 @@ class MissionExecutor:
                 f"[bold]Event Type:[/bold]   {mission_payload.get('event', {}).get('event_type', 'N/A')}\n"
                 f"[bold]Initiated:[/bold]    {datetime.utcnow().isoformat()}Z\n"
                 f"[bold]Model:[/bold]        {self.model}\n"
-                f"[bold]Host:[/bold]         {self.ollama_host}",
+                f"[bold]Host:[/bold]         {self.ollama_host}\n"
+                f"[bold]Mode:[/bold]         {mode}",
                 title="[bold magenta]MISSION INITIATED[/bold magenta]",
                 border_style="magenta",
             )
@@ -167,16 +191,21 @@ class MissionExecutor:
         }
 
         # --- Step B: Initialise timeline ---
-        # mission_id: use plan's ID later; for now derive from customer_id + timestamp
         mission_ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        mission_id = f"{customer_id}-{mission_ts}"
         timeline = MissionTimeline(
-            mission_id=f"{customer_id}-{mission_ts}",
+            mission_id=mission_id,
             customer_id=customer_id,
             customer_name=mission_payload.get("customer_name", customer_id),
             model=self.model,
         )
         context["timeline"] = timeline
         context["timeline_file"] = timeline.filepath
+        context["mission_id"] = mission_id
+
+        # Persist initial context in memory service
+        if self._memory:
+            self._memory.set_context(mission_id, context)
 
         # --- Step C: Plan the mission using LLM ---
         mission_description = mission_payload.get(
@@ -241,6 +270,22 @@ class MissionExecutor:
             phase_outputs = self._phase_outputs(agent_name, context)
             timeline.complete_phase(agent_name, summary=phase_summary, key_outputs=phase_outputs)
 
+            # Persist updated context after each phase
+            if self._memory:
+                self._memory.update_context(mission_id, {
+                    "status": context.get("status"),
+                    "current_phase": agent_name,
+                    "risk_level": context.get("risk_level"),
+                    "risk_score": context.get("risk_score"),
+                    "final_decision": context.get("final_decision"),
+                })
+                # Publish real-time event for UI
+                self._memory.publish_event(f"mission:{mission_id}", {
+                    "event": "phase_complete",
+                    "phase": agent_name,
+                    "summary": phase_summary,
+                })
+
             # Stop pipeline early on hard escalations
             if context.get("status", "").startswith("ESCALATED_") and agent_name == "DataCollectionAgent":
                 console.print(f"[red]Pipeline halted at {agent_name}: {context['status']}[/red]")
@@ -252,6 +297,18 @@ class MissionExecutor:
         context["status"] = "COMPLETE"
         context["elapsed_seconds"] = elapsed
         timeline.complete_mission(context)
+
+        # Persist final result
+        if self._memory:
+            self._memory.update_context(mission_id, {
+                "status": "COMPLETE",
+                "final_decision": context.get("final_decision"),
+                "elapsed_seconds": elapsed,
+            })
+            self._memory.publish_event(f"mission:{mission_id}", {
+                "event": "completed",
+                "decision": context.get("final_decision"),
+            })
 
         self._print_final_report(context, elapsed)
         console.print(f"  [dim]Timeline written to: {timeline.filepath}[/dim]")

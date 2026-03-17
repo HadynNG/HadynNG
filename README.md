@@ -1,54 +1,60 @@
 # Agentic KYC Platform
 
-A demonstrable agentic AI platform for **KYC (Know Your Customer) Name Screening**, built with:
+A production-ready agentic AI platform for **KYC (Know Your Customer) Name Screening**, built for Hong Kong's AMLO/HKMA/SFC compliance frameworks.
 
-- **Orchestrator** — powered by [Ollama](https://ollama.com) running `qwen3.5:9b`
-- **Intent Parser** — maps free-form natural language to a structured KYC request, validated against an external SOP document
-- **6 specialised agents** mapped to the full KYC SOP (HKMA / AMLO / SFC compliant)
-- **Rich chain-of-thought output** — every LLM reasoning step is streamed to the terminal in real time
-- **Mock tools** — simulated CRM, identity verification, and sanctions screening APIs
+**Architecture:** Mission Broker → Orchestrator → AgentZero MCP → Agent Pipeline → Tool MCP → Tools
+
+**Stack:** Ollama + qwen3.5:9b | FastAPI | MCP | PostgreSQL | Redis | MinIO | Qdrant
 
 ---
 
 ## Architecture
 
 ```
-┌────────────────────────────────────────────────────────────┐
-│              Free-form User Prompt (natural language)       │
-└───────────────────────┬────────────────────────────────────┘
-                        │
-              ┌─────────▼──────────┐
-              │   IntentParser      │  ← orchestrator/intent_parser.py
-              │  Reads: kyc_sop.md  │    Validates prompt against SOP
-              │  Extracts: name,    │    Classifies event type
-              │  event_type, notes  │
-              └─────────┬──────────┘
-                        │  Structured intent
-              ┌─────────▼──────────┐
-              │  MissionExecutor   │  ← orchestrator/mission_executor.py
-              │  (orchestrator)    │    Drives the full pipeline
-              └─────────┬──────────┘
-                        │  Uses LLM to plan
-              ┌─────────▼──────────┐
-              │    TaskPlanner     │  ← orchestrator/task_planner.py
-              │   (qwen3.5:9b)    │    Shows chain-of-thought
-              └─────────┬──────────┘
-                        │  Execution plan
-        ┌───────────────▼───────────────────────────┐
-        │              Agent Pipeline                │
-        │                                           │
-        │  1. DataCollectionAgent   (Steps 1.1–1.3) │
-        │  2. RiskAssessmentAgent   (Step  2.1)     │
-        │  3. AereveScreeningAgent        (Steps 3.1–3.2) │
-        │  4. AlertReviewAgent      (Steps 4.1–4.3) │  ← LLM reasoning
-        │  5. DecisionAgent         (Steps 5.1–5.3) │  ← LLM reasoning
-        │  6. DocumentationAgent    (Steps 6.1–6.2) │
-        └───────────────┬───────────────────────────┘
-                        │
-        ┌───────────────┼───────────────┐
-        ▼               ▼               ▼
-   CRM Tool      Identity Tool    Screening Tool
-   (crm_tool)   (identity_tool)  (screening_tool)
+┌──────────────────────────────────────────────────────────────────────┐
+│                    User / External Client                            │
+└────────────────────────────┬─────────────────────────────────────────┘
+                             │  HTTP / WebSocket
+                 ┌───────────▼───────────┐
+                 │    Mission Broker      │  ← FastAPI gateway (port 8000)
+                 │    POST /missions      │    Intent parsing, mission dispatch
+                 │    POST /parse         │    Chat, WebSocket timeline
+                 │    POST /chat          │
+                 │    WS /ws/missions/{id}│
+                 └───────────┬───────────┘
+                             │
+           ┌─────────────────┼──────────────────────┐
+           │                 │                      │
+  ┌────────▼──────┐  ┌──────▼──────┐  ┌────────────▼────────────┐
+  │ IntentParser   │  │ Orchestrator│  │   Memory Service        │
+  │ (SOP-based     │  │ + Planner   │  │   Redis   → short-term  │
+  │  classifier)   │  │ (LLM plan)  │  │   Qdrant  → vectors     │
+  └────────────────┘  └──────┬──────┘  │   Postgres → long-term  │
+                             │         └─────────────────────────┘
+                ┌────────────▼──────────────┐
+                │   AgentZero MCP Server    │  ← Central agent dispatcher
+                │   (wraps all 6 agents)    │    (port 8100)
+                └────────────┬──────────────┘
+                             │
+         ┌───────────────────▼─────────────────────────────┐
+         │                Agent Pipeline                    │
+         │                                                 │
+         │  1. DataCollectionAgent   (Steps 1.1–1.3)       │
+         │  2. RiskAssessmentAgent   (Step  2.1)           │
+         │  3. AereveScreeningAgent  (Steps 3.1–3.2)       │
+         │  4. AlertReviewAgent      (Steps 4.1–4.3)  ← LLM│
+         │  5. DecisionAgent         (Steps 5.1–5.3)  ← LLM│
+         │  6. DocumentationAgent    (Steps 6.1–6.2)       │
+         └───────────────────┬─────────────────────────────┘
+                             │
+                ┌────────────▼──────────────┐
+                │   Tools MCP Server        │  ← External integrations
+                │   CRM, Identity, Screening│    (port 8101)
+                └────────────┬──────────────┘
+                             │
+         ┌───────────────────┼───────────────────┐
+         ▼                   ▼                   ▼
+    CRM Tool          Identity Tool       Screening Tool
 ```
 
 ---
@@ -58,40 +64,75 @@ A demonstrable agentic AI platform for **KYC (Know Your Customer) Name Screening
 ```
 HadynNG/
 │
-├── orchestrator/                   # Core platform components
+├── config/                          # Centralised configuration
 │   ├── __init__.py
-│   ├── intent_parser.py            # Free-form prompt → structured KYC intent (SOP-validated)
-│   ├── mission_executor.py         # Central coordinator — runs the full pipeline
-│   ├── mission_timeline.py         # Per-run timeline state tracker (JSON)
-│   └── task_planner.py             # LLM-based mission analysis and planning
+│   └── settings.py                  # pydantic-settings (loads from .env)
 │
-├── agents/                         # One agent per KYC phase
-│   ├── __init__.py
-│   ├── base_agent.py               # Base class: Ollama integration + CoT display
-│   ├── data_collection_agent.py    # Phase 1: Trigger → CRM → Identity verify
-│   ├── risk_assessment_agent.py    # Phase 2: Risk score + LLM narrative
-│   ├── screening_agent.py          # Phase 3: Name variants → Sanctions/PEP screen
-│   ├── alert_review_agent.py       # Phase 4: Triage → LLM investigation → EDD
-│   ├── decision_agent.py           # Phase 5: LLM decision → MLRO escalation → STR
-│   └── documentation_agent.py      # Phase 6: Audit log → Notifications
+├── services/                        # Production services
+│   ├── llm_gateway/                 # Centralised LLM proxy
+│   │   └── gateway.py               # Ollama wrapper with caching + streaming
+│   ├── memory/                      # Memory service
+│   │   ├── manager.py               # Unified short/long/semantic memory
+│   │   ├── redis_store.py           # Redis (context, cache, pub/sub)
+│   │   └── vector_store.py          # Qdrant (RAG, agent memory)
+│   └── mission_broker/              # FastAPI HTTP gateway
+│       └── app.py                   # REST + WebSocket endpoints
 │
-├── tools/                          # Mock external API integrations
-│   ├── __init__.py
-│   ├── crm_tool.py                 # Simulated CRM / customer database
-│   ├── identity_tool.py            # Simulated Jumio/Onfido identity verification
-│   └── screening_tool.py           # Simulated Dow Jones / World-Check screening
+├── mcp_servers/                     # MCP protocol servers
+│   ├── agent_zero/                  # Central agent dispatcher
+│   │   └── server.py                # Wraps all 6 agents as MCP tools
+│   └── tools/                       # External tool integrations
+│       └── server.py                # CRM, identity, screening as MCP tools
 │
-├── demo/
-│   ├── run_demo.py                 # ← ENTRY POINT — run this
-│   ├── kyc_sop.md                  # External SOP reference (HKMA/AMLO/SFC aligned)
-│   └── cases/                      # Pre-built test scenarios
-│       ├── case_clean.json         # Low-risk HK individual → expected: APPROVE
-│       ├── case_pep.json           # Philippine senator (PEP) → expected: ESCALATE_TO_MLRO
-│       └── case_sanctioned.json    # Russian exec on UN/OFAC lists → expected: REJECT
+├── orchestrator/                    # Core pipeline coordination
+│   ├── intent_parser.py             # Free-form prompt → structured KYC intent
+│   ├── mission_executor.py          # Central coordinator (demo + production)
+│   ├── mission_timeline.py          # Real-time status tracker (JSON)
+│   └── task_planner.py              # LLM-based mission planning
 │
-├── audit_logs/                     # Auto-created — JSON audit trails per run
+├── agents/                          # KYC pipeline agents
+│   ├── base_agent.py                # Base: LLM Gateway + direct Ollama + memory
+│   ├── data_collection_agent.py     # Phase 1: Event → CRM → Identity
+│   ├── risk_assessment_agent.py     # Phase 2: Risk score + narrative
+│   ├── screening_agent.py           # Phase 3: Name variants → Screening
+│   ├── alert_review_agent.py        # Phase 4: Triage → Investigation → EDD
+│   ├── decision_agent.py            # Phase 5: Decision → MLRO → STR
+│   └── documentation_agent.py       # Phase 6: Audit → Notifications
 │
-├── requirements.txt
+├── tools/                           # Tool implementations
+│   ├── crm_tool.py                  # CRM database (mock → production)
+│   ├── identity_tool.py             # Identity verification
+│   ├── screening_tool.py            # Sanctions/PEP screening
+│   └── md_loader.py                 # Markdown data parser
+│
+├── storage/                         # Organised document storage
+│   ├── documents/
+│   │   ├── sop/                     # Standard Operating Procedures
+│   │   │   └── kyc_sop.md
+│   │   ├── rag/                     # RAG corpus
+│   │   │   └── system_design.md
+│   │   └── skills/                  # Agent skill definitions
+│   │       └── agent_skills.md
+│   └── seeds/                       # Seed data for dev/test
+│       ├── crm_customers.md
+│       ├── identity_registry.md
+│       ├── sanctions_pep_list.md
+│       ├── jurisdiction_risk.md
+│       └── adverse_media.md
+│
+├── data/                            # Original data (backward-compatible)
+├── demo/                            # CLI demo runner + test cases
+│   ├── run_demo.py                  # ← ENTRY POINT (demo mode)
+│   ├── kyc_sop.md                   # SOP reference (also in storage/)
+│   └── cases/                       # Preset test scenarios
+│
+├── infra/                           # Infrastructure
+│   └── init.sql                     # PostgreSQL schema (WORM audit logs)
+│
+├── docker-compose.yml               # Full stack: PG + Redis + MinIO + Qdrant + Ollama
+├── Dockerfile                       # Application container
+├── .env.example                     # Environment template
+├── requirements.txt                 # Python dependencies
 └── README.md
 ```
 
@@ -99,167 +140,185 @@ HadynNG/
 
 ## Prerequisites
 
-### 1. Python 3.11+
+### Demo Mode (CLI only)
 ```bash
-python --version   # must be 3.11 or higher
-```
-
-### 2. Ollama running locally with the required model
-```bash
-# Install Ollama if not already installed
-# https://ollama.com/download
-
-# Pull the model
+python --version   # 3.11+
 ollama pull qwen3.5:9b
-
-# Verify it's available
-ollama list
-```
-
-### 3. Install Python dependencies
-```bash
-# From the repo root (HadynNG/)
 pip install -r requirements.txt
 ```
 
+### Production Mode (full stack)
+```bash
+docker --version   # Docker 24+
+docker compose version
+cp .env.example .env   # Edit with your values
+```
+
 ---
 
-## Running the Demo
+## Running
 
-All commands are run from the **repo root** (`HadynNG/`).
-
-### Interactive mode — free-form prompt
+### Demo Mode (backward-compatible CLI)
 ```bash
+# Interactive conversational mode
 python demo/run_demo.py
+
+# Preset test cases
+python demo/run_demo.py --demo clean       # → APPROVE
+python demo/run_demo.py --demo medium      # → APPROVE_WITH_CONDITIONS
+python demo/run_demo.py --demo pep         # → ESCALATE_TO_MLRO
+python demo/run_demo.py --demo sanctioned  # → REJECT
 ```
 
-You will be prompted to describe the customer in plain language. The **IntentParser** reads the KYC SOP (`demo/kyc_sop.md`) and determines whether your input is a valid KYC screening request. If yes, it extracts the customer name and event type automatically and looks them up in the CRM.
-
-```
-Your request: Screen Valeria Petrov — flagged suspicious wire transfer
-  ✓ KYC request recognised — Subject: Valeria Petrov  Event: transaction_alert
-```
-
-If the input is not a KYC request (e.g. a general enquiry), the system explains why and re-prompts.
-
-### Quick preset — skip the prompt
+### Production Mode (Docker Compose)
 ```bash
-# Case 1 — Clean customer (expected: APPROVE)
-python demo/run_demo.py --demo clean
+# Start all infrastructure + application services
+docker compose up -d
 
-# Case 2 — Politically Exposed Person (expected: ESCALATE_TO_MLRO)
-python demo/run_demo.py --demo pep
+# Check health
+curl http://localhost:8000/health
 
-# Case 3 — Sanctioned individual (expected: REJECT)
-python demo/run_demo.py --demo sanctioned
+# Parse intent
+curl -X POST http://localhost:8000/parse \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Screen Valeria Petrov — suspicious wire transfer"}'
+
+# Create mission
+curl -X POST http://localhost:8000/missions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "customer_id": "C003",
+    "customer_name": "Valeria Petrov",
+    "event_type": "transaction_alert",
+    "notes": "Suspicious wire transfer flagged"
+  }'
+
+# Check mission status
+curl http://localhost:8000/missions/{mission_id}
+
+# Chat with compliance assistant
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "What triggers EDD under HKMA guidelines?"}'
 ```
 
----
+### Infrastructure Services
 
-## What You'll See
-
-Each run produces a **full terminal walkthrough** with colour-coded panels:
-
-| Colour | Panel | Description |
-|--------|-------|-------------|
-| Yellow | `Chain-of-Thought` | LLM's internal reasoning (streamed live) |
-| Green  | `LLM Analysis`     | LLM's final structured response |
-| Cyan   | Step headers       | Current KYC phase being executed |
-| Red    | Alerts / Decisions | True positive hits, escalations, STRs |
-| Dim    | Tool calls         | CRM, identity, screening API calls |
-
-Audit log files are written to `audit_logs/` and timeline state to `timelines/` after each run.
+| Service | URL | Purpose |
+|---------|-----|---------|
+| Mission Broker | http://localhost:8000 | API gateway |
+| MinIO Console | http://localhost:9001 | Document storage UI |
+| PostgreSQL | localhost:5432 | Database |
+| Redis | localhost:6379 | Cache + pub/sub |
+| Qdrant | http://localhost:6333 | Vector DB dashboard |
+| Ollama | http://localhost:11434 | LLM API |
 
 ---
 
 ## Demo Cases
 
-### Case 1 — `clean` (James Wong Wai-Man, HKG)
-- HK ID verified ✓
-- Low-risk jurisdiction ✓
-- No sanctions / PEP hits ✓
-- **Expected outcome: APPROVE**
-
-### Case 2 — `pep` (Senator Marcus Delgado, PHL)
-- Self-declared PEP ✓
-- Found in PEP database ✓
-- Adverse media (corruption allegation) ✓
-- EDD triggered ✓
-- **Expected outcome: ESCALATE_TO_MLRO**
-
-### Case 3 — `sanctioned` (Valeria Petrov, RUS)
-- Russian national (FATF high-risk jurisdiction)
-- Confirmed TRUE_POSITIVE on UN Security Council + OFAC SDN lists ✓
-- Adverse media (sanctions evasion) ✓
-- STR preparation triggered ✓
-- **Expected outcome: REJECT**
+| Case | Customer | Expected | Key Factors |
+|------|----------|----------|-------------|
+| `clean` | James Wong (HKG) | APPROVE | HK ID verified, LOW risk, no hits |
+| `medium` | Li Wei Chen (HKG) | APPROVE_WITH_CONDITIONS | MEDIUM risk, enhanced monitoring |
+| `pep` | Senator Marcus Delgado (PHL) | ESCALATE_TO_MLRO | Self-declared PEP, adverse media |
+| `sanctioned` | Valeria Petrov (RUS) | REJECT | UN + OFAC TRUE_POSITIVE sanctions |
 
 ---
 
 ## Decision Logic
 
-The `DecisionAgent` enforces a clear, policy-grounded boundary between outcomes:
-
 | Outcome | Trigger condition |
 |---------|-------------------|
 | `APPROVE` | No hits, LOW risk, identity clean |
-| `APPROVE_WITH_CONDITIONS` | No hits, MEDIUM risk or PEP cleared — enhanced monitoring required |
-| `ESCALATE_TO_MLRO` | PEP TRUE_POSITIVE, adverse media, HIGH risk without confirmed sanctions — human judgement required |
-| `REJECT` | Confirmed TRUE_POSITIVE on a **government sanctions list** (UN, OFAC SDN, EU Consolidated, HKMA) — factual finding only |
+| `APPROVE_WITH_CONDITIONS` | No hits, MEDIUM risk or PEP cleared — enhanced monitoring |
+| `ESCALATE_TO_MLRO` | PEP TRUE_POSITIVE, adverse media, HIGH risk without sanctions |
+| `REJECT` | Confirmed TRUE_POSITIVE on government sanctions list (UN, OFAC, EU, HKMA) |
 
-> **Key principle:** `REJECT` is reserved for confirmed sanctions matches only — not for high risk scores or adverse media alone. Adverse media and PEP concerns route to `ESCALATE_TO_MLRO` for human review.
+> **Key principle:** `REJECT` is reserved for confirmed sanctions matches only.
 
 ---
 
-## KYC SOP Reference
+## Memory Architecture
 
-The `IntentParser` validates all user inputs against `demo/kyc_sop.md` before triggering the pipeline. The SOP defines:
-- **Trigger conditions** — onboarding, transaction alerts, periodic review, customer updates
-- **Intent keywords** — phrases that indicate a KYC request
-- **Out-of-scope requests** — general enquiries, IT support, complaints
-- **Decision thresholds** — aligned with the decision logic table above
+| Tier | Store | Purpose |
+|------|-------|---------|
+| Short-term | Redis | Mission context, session state (24h TTL) |
+| Long-term | PostgreSQL | Audit logs, mission records, user preferences |
+| Semantic | Qdrant | RAG document embeddings, agent memory (cross-mission learning) |
 
-To update compliance rules or trigger conditions, edit `demo/kyc_sop.md` — no code changes needed.
+Agents store insights after each phase. Future missions recall relevant past decisions via vector similarity search.
+
+---
+
+## MCP Tools Reference
+
+### AgentZero MCP (port 8100)
+| Tool | Description |
+|------|-------------|
+| `run_data_collection` | Phase 1: Event classification, CRM lookup, identity verification |
+| `run_risk_assessment` | Phase 2: Risk scoring and LLM narrative |
+| `run_screening` | Phase 3: Name variants, sanctions/PEP screening |
+| `run_alert_review` | Phase 4: Triage, investigation, EDD |
+| `run_decision` | Phase 5: Final decision, MLRO escalation, STR |
+| `run_documentation` | Phase 6: Audit trail, notifications |
+| `run_full_pipeline` | All 6 phases in sequence |
+| `agent_status` | Check available agents |
+| `get_context` | Retrieve mission context |
+
+### Tools MCP (port 8101)
+| Tool | Description |
+|------|-------------|
+| `crm_search` | Fuzzy name search in CRM |
+| `crm_get` | Get customer by ID |
+| `crm_register` | Register new customer |
+| `identity_verify` | Verify identity documents |
+| `screening_screen` | Screen against sanctions/PEP lists |
+| `screening_adverse_media` | Search adverse media |
+| `jurisdiction_risk` | FATF jurisdiction risk lookup |
 
 ---
 
 ## KYC SOP Phase Coverage
 
-| SOP Step | Agent | Description | LLM Used |
-|----------|-------|-------------|----------|
-| —        | IntentParser | Free-form intent classification + SOP validation | ✓ |
-| 1.1 | DataCollectionAgent | Event classification | ✓ |
+| Step | Agent | Description | LLM |
+|------|-------|-------------|-----|
+| — | IntentParser | Intent classification + SOP validation | Yes |
+| 1.1 | DataCollectionAgent | Event classification | Yes |
 | 1.2 | DataCollectionAgent | CRM data retrieval | — |
 | 1.3 | DataCollectionAgent | Identity verification | — |
-| 2.1 | RiskAssessmentAgent | Risk scoring + narrative | ✓ |
+| 2.1 | RiskAssessmentAgent | Risk scoring + narrative | Yes |
 | 3.1 | AereveScreeningAgent | Name variant generation | — |
 | 3.2 | AereveScreeningAgent | Sanctions/PEP screening | — |
 | 4.1 | AlertReviewAgent | Alert triage | — |
-| 4.2 | AlertReviewAgent | Match investigation | ✓ |
-| 4.3 | AlertReviewAgent | Enhanced Due Diligence | ✓ |
-| 5.1 | DecisionAgent | Final decision | ✓ |
-| 5.2 | DecisionAgent | MLRO escalation | ✓ |
-| 5.3 | DecisionAgent | STR preparation | ✓ |
+| 4.2 | AlertReviewAgent | Match investigation | Yes |
+| 4.3 | AlertReviewAgent | Enhanced Due Diligence | Yes |
+| 5.1 | DecisionAgent | Final decision | Yes |
+| 5.2 | DecisionAgent | MLRO escalation | Yes |
+| 5.3 | DecisionAgent | STR preparation | Yes |
 | 6.1 | DocumentationAgent | Audit logging | — |
 | 6.2 | DocumentationAgent | Stakeholder notifications | — |
 
-> **Out of scope for this demo:** Step 3.3 (periodic/scheduled re-screening)
-
 ---
 
-## Configuring Ollama
+## Configuration
 
-In `demo/run_demo.py`, edit these two constants:
-```python
-OLLAMA_HOST = "http://localhost:11434"   # Change if Ollama runs elsewhere
-MODEL = "qwen3.5:9b"                    # Change to any supported model
-```
+All configuration is centralised in `config/settings.py` and loaded from `.env`:
 
-To use a faster/smaller model for testing:
 ```bash
-ollama pull qwen3:4b
-# then set MODEL = "qwen3:4b" in run_demo.py
+cp .env.example .env
+# Edit .env with your values
 ```
+
+Key environment variables:
+- `OLLAMA_HOST` — LLM server URL
+- `OLLAMA_MODEL` — Model name (default: `qwen3.5:9b`)
+- `POSTGRES_*` — Database connection
+- `REDIS_*` — Cache connection
+- `MINIO_*` — Object storage
+- `QDRANT_*` — Vector database
+
+For demo mode, no `.env` is needed — all defaults work with local Ollama.
 
 ---
 

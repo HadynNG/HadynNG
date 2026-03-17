@@ -1,455 +1,300 @@
 # Agentic KYC Platform — System Design Document
 
-**Version:** 1.0
-**Status:** Demo Phase
+**Version:** 2.0
+**Status:** Production-Ready Architecture
 **Author:** Platform Team
-**Compliance Frameworks:** HKMA AML/CFT Manual · AMLO (Cap. 615) · SFC AML Guidelines
 
 ---
 
-## 1. Executive Summary
+## Executive Summary
 
-This document describes the architecture and design decisions behind the Agentic KYC Platform — a custom-built AI orchestration system that automates the Know Your Customer (KYC) Name Screening process in compliance with Hong Kong regulatory requirements.
+An end-to-end KYC screening platform built on an agentic AI architecture for Hong Kong's AMLO/HKMA/SFC compliance frameworks. The platform uses a **Mission Broker → Orchestrator → AgentZero MCP → Agent Pipeline → Tool MCP** architecture to provide:
 
-The platform replaces manual, sequential screening workflows with a pipeline of specialised AI agents, each responsible for a discrete phase of the KYC SOP. A Large Language Model (LLM) provides reasoning capability at critical decision points, while deterministic rule-based logic governs mechanical steps. Every action is fully logged for regulatory audit.
-
-**Key outcomes:**
-- End-to-end KYC screening in under 3 minutes (vs. 2–4 hours manually)
-- Full chain-of-thought transparency — every AI decision is traceable
-- Audit-ready output meeting AMLO Section 20 five-year retention requirements
-- Zero framework dependencies — fully auditable, no vendor lock-in
+- Full KYC name screening in under 3 minutes (vs 2–4 hours manual)
+- LLM-powered reasoning at critical judgment points
+- Complete audit trail for AMLO Section 20 compliance
+- Production-ready infrastructure with PostgreSQL, Redis, MinIO, and Qdrant
 
 ---
 
-## 2. Design Philosophy
+## Design Philosophy
 
-### 2.1 Why No LangChain or LangGraph?
+### Why No LangChain / LangGraph
 
-Frameworks like LangChain are valuable for rapid prototyping, but introduce risks that are unacceptable in a regulated compliance context:
+1. **Full auditability** — every LLM call, input, and output is visible and logged
+2. **No vendor lock-in** — swap Ollama for any OpenAI-compatible endpoint
+3. **Minimal abstraction** — the code IS the documentation
+4. **Compliance-first** — framework magic is unacceptable in regulated environments
 
-| Concern | LangChain / LangGraph | This Platform |
-|---|---|---|
-| Auditability | Hidden abstraction layers | Every line explicit and auditable |
-| Vendor lock-in | Framework version drift | Pure Python, no dependency risk |
-| Regulatory approval | Framework internals are black boxes | All logic is reviewable by compliance |
-| Failure transparency | Hard to trace errors through chains | Every error has a clear origin |
-| Control | Framework decides routing | We decide routing, always |
+### Two-Role Model
 
-The platform is built on three primitives only: **Python**, **Ollama HTTP API**, and **JSON**. This is deliberate.
+- **Planner** (LLM): Analyses context, generates plans, makes judgment calls
+- **Executor** (code): Enforces pipeline order, calls tools, applies rule-based logic
 
-### 2.2 The Two-Role Model
-
-The system separates AI responsibilities into two distinct roles:
-
-- **Planner (LLM):** Analyses the mission and generates a plan. Does not execute.
-- **Executor (code):** Executes the plan step by step. Does not improvise.
-
-This mirrors how a well-run compliance team works: a senior analyst designs the approach, junior analysts execute defined procedures.
-
-### 2.3 LLM Used Surgically, Not Universally
-
-Not every step needs AI reasoning. The LLM is called only where genuine judgment is required:
-
-| Step | Reasoning needed? | Uses LLM? |
-|---|---|---|
-| CRM data retrieval | No — deterministic lookup | ❌ |
-| Identity verification | No — API call | ❌ |
-| Risk score calculation | No — rule-based formula | ❌ |
-| Name variant generation | No — string algorithm | ❌ |
-| Sanctions database match | No — fuzzy string match | ❌ |
-| **Event classification** | Yes — ambiguous types | ✅ |
-| **Risk narrative** | Yes — professional text | ✅ |
-| **Alert investigation** | Yes — evidence weighing | ✅ |
-| **EDD report** | Yes — regulatory document | ✅ |
-| **Compliance decision** | Yes — multi-factor ruling | ✅ |
-| **MLRO dossier / STR** | Yes — professional communication | ✅ |
-
-This keeps LLM calls fast and targeted, and ensures the pipeline does not fail due to AI errors on trivial operations.
+The LLM is never trusted with mechanical steps (CRM lookup, risk scoring formulas, file I/O). It is only invoked where human-like judgment is genuinely needed.
 
 ---
 
-## 3. System Architecture
+## System Architecture (v2.0)
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                      run_demo.py / API Gateway                       │
-│   User enters customer details → mission_payload dict created        │
-└───────────────────────────────┬─────────────────────────────────────┘
-                                │  mission_payload
-                    ┌───────────▼────────────┐
-                    │    MissionExecutor      │
-                    │  (orchestrator core)    │
-                    └────┬──────────┬────────┘
-                         │          │
-              ┌──────────▼──┐  ┌───▼──────────────┐
-              │ TaskPlanner  │  │ MissionTimeline   │
-              │ (LLM brain)  │  │ (UI status file)  │
-              └──────────────┘  └──────────────────┘
-                         │
-              ┌──────────▼──────────────────────────────────────┐
-              │               Agent Pipeline                     │
-              │                                                  │
-              │  ┌─────────────────────────────────────────┐    │
-              │  │  1. DataCollectionAgent   (Steps 1.1–3)  │    │
-              │  │  2. RiskAssessmentAgent   (Step  2.1)    │    │
-              │  │  3. AereveScreeningAgent        (Steps 3.1–2)  │    │
-              │  │  4. AlertReviewAgent      (Steps 4.1–3)  │◄── LLM
-              │  │  5. DecisionAgent         (Steps 5.1–3)  │◄── LLM
-              │  │  6. DocumentationAgent    (Steps 6.1–2)  │    │
-              │  └─────────────────────────────────────────┘    │
-              └─────────────────────┬───────────────────────────┘
-                                    │
-              ┌─────────────────────▼──────────────────────┐
-              │                  Tools Layer                 │
-              │  CRMTool · IdentityTool · ScreeningTool      │
-              └────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     User / External Client                              │
+└───────────────────────────┬─────────────────────────────────────────────┘
+                            │  HTTP / WebSocket
+                ┌───────────▼────────────┐
+                │    Mission Broker       │  ← FastAPI gateway
+                │    (services/broker)    │    POST /missions, /parse, /chat
+                │                        │    WS /ws/missions/{id}
+                └───────────┬────────────┘
+                            │
+          ┌─────────────────┼─────────────────────┐
+          │                 │                     │
+ ┌────────▼───────┐  ┌─────▼──────┐  ┌───────────▼──────────┐
+ │  IntentParser   │  │ Orchestrator│  │   Memory Service     │
+ │  (SOP-based     │  │ + Planner  │  │   Redis (short-term)  │
+ │   classifier)   │  │            │  │   Qdrant (vectors)    │
+ └─────────────────┘  └─────┬──────┘  │   PostgreSQL (long)   │
+                            │         └──────────────────────┘
+               ┌────────────▼──────────────┐
+               │    AgentZero MCP Server    │  ← Central agent dispatcher
+               │  (mcp_servers/agent_zero)  │    Wraps all 6 agents
+               └────────────┬──────────────┘
+                            │
+        ┌───────────────────▼────────────────────────────┐
+        │                Agent Pipeline                   │
+        │                                                │
+        │  1. DataCollectionAgent    (Steps 1.1–1.3)     │
+        │  2. RiskAssessmentAgent    (Step  2.1)         │
+        │  3. AereveScreeningAgent   (Steps 3.1–3.2)     │
+        │  4. AlertReviewAgent       (Steps 4.1–4.3)     │  ← LLM
+        │  5. DecisionAgent          (Steps 5.1–5.3)     │  ← LLM
+        │  6. DocumentationAgent     (Steps 6.1–6.2)     │
+        └───────────────────┬────────────────────────────┘
+                            │
+               ┌────────────▼──────────────┐
+               │    Tools MCP Server        │  ← External tool integrations
+               │  (mcp_servers/tools)       │
+               └────────────┬──────────────┘
+                            │
+        ┌───────────────────┼───────────────────┐
+        ▼                   ▼                   ▼
+   CRM Tool          Identity Tool       Screening Tool
 ```
-
-### 3.1 Shared Context Dictionary
-
-All components communicate through a single Python dictionary (`context`) that passes through the pipeline. This replaces message queues, databases, and vector stores for the demo:
-
-```
-context = {
-  # Input
-  "customer_id": "C001",
-  "event": { "event_type": "onboarding", ... },
-
-  # Written by DataCollectionAgent
-  "customer_data": { "full_name": "James Wong", ... },
-  "identity_verification": { "status": "VERIFIED", ... },
-  "jurisdiction_risk": { "risk_level": "LOW", ... },
-
-  # Written by RiskAssessmentAgent
-  "risk_score": 10,
-  "risk_level": "LOW",
-  "risk_narrative": "Customer presents low inherent risk...",
-
-  # Written by AereveScreeningAgent
-  "screening_results": { "total_hits": 0, "hits": [] },
-  "adverse_media": [],
-
-  # Written by AlertReviewAgent
-  "triaged_alerts": [],
-  "investigation_results": [],
-  "edd_required": false,
-
-  # Written by DecisionAgent
-  "final_decision": "APPROVE",
-  "requires_str": false,
-  "decision_details": { ... },
-
-  # Written by DocumentationAgent
-  "audit_id": "AUD-C001-20240304T...",
-  "audit_log_file": "audit_logs/audit_C001_...json",
-
-  # Cross-cutting
-  "audit_log": [ ... ],      # every agent appends here
-  "timeline": <MissionTimeline>,
-  "timeline_file": "timelines/timeline_....json",
-  "status": "COMPLETE"
-}
-```
-
-In the production architecture (see Section 8), this context would be stored in Redis with a mission_id key, allowing distributed agents to read/write it.
 
 ---
 
-## 4. Component Design
+## Infrastructure Stack
 
-### 4.1 MissionExecutor (`orchestrator/mission_executor.py`)
+| Component | Purpose | Port |
+|-----------|---------|------|
+| **PostgreSQL 16** | Audit logs (WORM), missions, customers, screening results | 5432 |
+| **Redis 7** | Mission context, session cache, pub/sub for real-time updates | 6379 |
+| **MinIO** | Document storage (SOP, RAG corpus, audit report archives) | 9000/9001 |
+| **Qdrant** | Vector DB for agent memory and RAG document retrieval | 6333/6334 |
+| **Ollama** | LLM inference engine (GPU-accelerated) | 11434 |
 
-The central coordinator. Responsibilities:
-1. Receive the mission payload
-2. Initialise the `MissionTimeline` for UI tracking
-3. Call `TaskPlanner` to generate an LLM execution plan
-4. Run agents in the fixed `PIPELINE_ORDER` (safety guarantee — the LLM plan informs but never overrides the sequence)
-5. Pass the shared context through each agent
-6. Catch and log agent errors without crashing the pipeline
-7. Write the final report
+### Application Services
 
-**Key design decision:** The execution order is hardcoded in `PIPELINE_ORDER`. Even if the LLM suggests a different sequence, the code ignores it. This ensures the compliance pipeline cannot be manipulated or accidentally reordered by the model.
+| Service | Purpose | Port |
+|---------|---------|------|
+| **Mission Broker** | FastAPI HTTP/WS gateway | 8000 |
+| **AgentZero MCP** | Central agent dispatcher (MCP protocol) | 8100 |
+| **Tools MCP** | External tool integrations (MCP protocol) | 8101 |
 
-### 4.2 TaskPlanner (`orchestrator/task_planner.py`)
+---
 
-Uses Ollama to analyse the mission description and return a structured JSON execution plan with:
-- Mission summary and scope
-- Compliance framework applicability
-- Per-agent purpose and expected inputs/outputs
-- Risk flags identified upfront
-- Estimated decision outcomes
+## Data Flow
 
-The plan is used for the opening summary display and the timeline, not for routing.
-
-**Consistency settings:** `temperature=0.05`, `seed=42`, `repeat_penalty=1.1` — these ensure the planning output is near-deterministic for the same input while avoiding full rigidity.
-
-### 4.3 BaseAgent (`agents/base_agent.py`)
-
-The parent class for all six KYC agents. Provides:
-
-**`_llm_reason(system_prompt, user_prompt, max_tokens)`**
-- Calls Ollama with streaming enabled
-- Separates thinking tokens (`<think>`) from the response in real time
-- Hard char-count safety breaks at `max_tokens × 6` (thinking) and `max_tokens × 4` (content) to prevent infinite generation loops
-- `num_predict`, `repeat_penalty=1.1`, `seed=42` in every call
-
-**`_extract_json(text)`**
-- Strips model special tokens (`<|endoftext|>`, `<|im_end|>`)
-- Finds the first syntactically balanced `{}` block by walking brace depth
-- Falls back to `{}` if no valid JSON is found — all call sites have safe defaults
-
-### 4.4 MissionTimeline (`orchestrator/mission_timeline.py`)
-
-Writes `timelines/timeline_<mission_id>.json` and updates it after every phase transition. The file is designed to be polled by a UI:
-
-```json
-{
-  "mission_id": "C001-20240304T120000Z",
-  "status": "IN_PROGRESS",
-  "current_phase": "Alert Review & Investigation",
-  "progress_pct": 57,
-  "phases": [
-    { "sequence": 1, "label": "Data Collection", "status": "COMPLETE",
-      "duration_seconds": 4.1, "summary": "James Wong verified — VERIFIED" },
-    { "sequence": 4, "label": "Alert Review", "status": "IN_PROGRESS",
-      "substeps": [
-        { "id": "4.1", "label": "Alert Triage", "status": "COMPLETE" },
-        { "id": "4.2", "label": "LLM Investigation", "status": "PENDING" }
-      ]
-    }
-  ],
-  "final_decision": null,
-  "updated_at": "2024-03-04T12:01:32Z"
-}
+### Production Path
+```
+User Prompt
+  → POST /missions (Mission Broker)
+    → IntentParser (classify: KYC or chat?)
+    → TaskPlanner (LLM: generate execution plan)
+    → MissionExecutor (coordinate pipeline)
+      → AgentZero MCP (dispatch agents)
+        → Agent.run(context)
+          → Tools MCP (CRM, screening, identity)
+        → Memory Service (persist context, store insights)
+      → Timeline (write progress JSON)
+    → Response (mission_id, status)
 ```
 
-See Section 7 for UI integration guidance.
-
----
-
-## 5. KYC SOP Mapping
-
-| SOP Step | Agent | Sub-step | LLM? | Tool Called |
-|---|---|---|---|---|
-| 1.1 Trigger event | DataCollectionAgent | Event classification | ✅ | — |
-| 1.2 Collect data | DataCollectionAgent | CRM query | ❌ | CRMTool |
-| 1.3 Verify identity | DataCollectionAgent | Registry check | ❌ | IdentityTool |
-| 2.1 Risk score | RiskAssessmentAgent | Rules engine | ❌ | — |
-| 2.1 Risk narrative | RiskAssessmentAgent | LLM narrative | ✅ | — |
-| 3.1 Query prep | AereveScreeningAgent | Name variants | ❌ | — |
-| 3.2 Screening | AereveScreeningAgent | Database search | ❌ | ScreeningTool |
-| 4.1 Triage | AlertReviewAgent | Rule-based sort | ❌ | — |
-| 4.2 Investigate | AlertReviewAgent | Evidence analysis | ✅ | — |
-| 4.3 EDD | AlertReviewAgent | Report generation | ✅ | — |
-| 5.1 Decide | DecisionAgent | Compliance ruling | ✅ | — |
-| 5.2 Escalate | DecisionAgent | MLRO dossier | ✅ | — |
-| 5.3 STR | DecisionAgent | JFIU report | ✅ | — |
-| 6.1 Audit log | DocumentationAgent | File write | ❌ | — |
-| 6.2 Notify | DocumentationAgent | Notification gen | ❌ | — |
-
-> **Out of scope (Phase 1):** Step 3.3 — periodic/scheduled rescreening
-
----
-
-## 6. LLM Integration Strategy
-
-### 6.1 Model
-
-| Setting | Value | Rationale |
-|---|---|---|
-| Model | `qwen3.5:9b` | Strong reasoning, runs locally on consumer hardware |
-| Temperature | `0.05` | Near-deterministic for consistent compliance outputs |
-| Seed | `42` | Reproducible outputs for the same input |
-| Repeat penalty | `1.1` | Prevents generation loops on complex prompts |
-| num_predict | `2048` (agents) / `4096` (planner) | Hard cap prevents infinite generation |
-
-### 6.2 Thinking Mode
-
-The `think=True` parameter activates the model's internal chain-of-thought reasoning, which streams as `<think>` tokens. These are:
-- Displayed live in the terminal (yellow text) for demonstration
-- Captured in `thinking_text` but not stored in the audit log
-- Subject to the same generation cap as regular content
-
-### 6.3 Prompt Engineering Principles
-
-1. **Role assignment first:** Every system prompt begins with a clear professional role ("You are a senior KYC compliance investigator...")
-2. **Explicit output format:** JSON schema is included in every system prompt that requires structured output
-3. **Scope constraints:** System prompts explicitly state what the model should NOT do (e.g., "do not flag missing customer fields — they come from CRM")
-4. **Conservative defaults:** If JSON parsing fails, all agents default to the safest possible outcome (e.g., `ESCALATE_TO_MLRO` rather than `APPROVE`)
-
----
-
-## 7. UI Integration — Timeline File
-
-The `MissionTimeline` is designed to be consumed by any UI without coupling. The timeline file at `timelines/timeline_<mission_id>.json` is:
-
-- **Created** when `MissionExecutor.execute()` is called
-- **Updated** after every phase start and completion (~every 30–120 seconds depending on LLM speed)
-- **Finalised** with `progress_pct: 100`, `status: "COMPLETE"`, and `final_decision` when the pipeline ends
-
-### 7.1 Polling Pattern (simple)
-
-```javascript
-// Frontend: poll every 2 seconds
-const TIMELINE_PATH = `/timelines/timeline_${missionId}.json`;
-
-async function pollTimeline() {
-  const res = await fetch(TIMELINE_PATH);
-  const data = await res.json();
-  updateProgressBar(data.progress_pct);
-  updatePhaseList(data.phases);
-  if (data.status === 'COMPLETE' || data.status === 'FAILED') {
-    clearInterval(poller);
-    showFinalDecision(data.final_decision);
-  }
-}
-const poller = setInterval(pollTimeline, 2000);
+### Demo Path (backward-compatible)
+```
+User Prompt
+  → run_demo.py (CLI)
+    → IntentParser (SOP-validated)
+    → MissionExecutor (direct agent calls)
+      → Agent Pipeline (shared context dict)
+        → Tool modules (direct Python calls)
+    → Terminal output (Rich panels)
 ```
 
-### 7.2 File-Watch Pattern (reactive)
+---
 
-On Linux/macOS, use `inotify`/`FSEvents` to trigger UI updates immediately when the file changes:
+## Memory Architecture
 
-```python
-# Backend: serve timeline over WebSocket on file change
-import asyncio
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
+### Three-Tier Memory Model
 
-class TimelineWatcher(FileSystemEventHandler):
-    def on_modified(self, event):
-        if event.src_path.endswith('.json'):
-            websocket.send(open(event.src_path).read())
-```
+| Tier | Store | TTL | Purpose |
+|------|-------|-----|---------|
+| **Short-term** | Redis | 24h | Mission context, session state, ephemeral cache |
+| **Long-term** | PostgreSQL | Permanent | Audit logs, mission records, user preferences |
+| **Semantic** | Qdrant | Permanent | RAG document embeddings, agent memory recall |
 
-### 7.3 REST API Pattern (production)
+### Agent Memory (Cross-Mission Learning)
 
-In production, wrap the executor in a FastAPI service:
+After each phase, key insights are stored as vector embeddings in Qdrant:
+- Risk assessment outcomes
+- Screening hit patterns
+- Decision rationale
 
-```python
-# POST /missions  → start a new KYC mission, returns mission_id
-# GET /missions/{id}/timeline  → return current timeline JSON
-# GET /missions/{id}/result    → return final context (after COMPLETE)
-```
+Future missions can recall relevant past insights via the MemoryManager.
 
-### 7.4 Timeline Data Contract
+### User Preferences
 
-Your UI can rely on these fields always being present:
-
-| Field | Type | Notes |
-|---|---|---|
-| `mission_id` | string | Unique per run |
-| `status` | string | `IN_PROGRESS`, `COMPLETE`, `FAILED` |
-| `current_phase` | string \| null | Display name of running phase |
-| `progress_pct` | int 0–100 | Suitable for a progress bar |
-| `phases[].status` | string | `PENDING`, `IN_PROGRESS`, `COMPLETE`, `FAILED` |
-| `phases[].substeps[].status` | string | Granular step tracking |
-| `final_decision` | string \| null | Only set when `status == COMPLETE` |
-| `risk_level` | string \| null | `LOW`, `MEDIUM`, `HIGH` |
-| `updated_at` | ISO-8601 | Last write timestamp for stale-check |
+Stored in Redis (fast reads) and PostgreSQL (persistence):
+- Default model preferences
+- Risk threshold overrides
+- Notification settings
 
 ---
 
-## 8. Production Architecture
+## LLM Integration
 
-The demo uses in-process agents with a shared Python dict. The production architecture maps directly to your original diagram:
+### Centralised LLM Gateway
+
+All LLM calls route through a single `LLMGateway` service:
+
+- **Connection pooling** — single Ollama client shared across agents
+- **Request caching** — Redis-backed cache for deterministic queries
+- **Token tracking** — request counts, cache hit rates, error rates
+- **Model routing** — support for multiple models per task type
+- **Safety caps** — character-level truncation prevents runaway generation
+
+### Model Configuration
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| Model | `qwen3.5:9b` | Good reasoning, fits consumer GPU |
+| Temperature | 0.05 | Near-deterministic for compliance |
+| Seed | 42 | Reproducible outputs |
+| Repeat penalty | 1.1 | Prevents generation loops |
+| Max tokens | 2048 (agents) / 4096 (planner) | Safety cap |
+
+---
+
+## MCP Architecture
+
+### Model Context Protocol (MCP)
+
+The platform uses MCP to decouple agent logic from tool execution:
+
+**AgentZero MCP Server** — wraps all 6 agents as callable MCP tools:
+- `run_data_collection`, `run_risk_assessment`, `run_screening`
+- `run_alert_review`, `run_decision`, `run_documentation`
+- `run_full_pipeline` (convenience)
+- `agent_status`, `get_context`
+
+**Tools MCP Server** — wraps external integrations:
+- `crm_search`, `crm_get`, `crm_register`
+- `identity_verify`, `identity_verify_ubo`
+- `screening_screen`, `screening_adverse_media`
+- `jurisdiction_risk`
+
+---
+
+## Document Organisation
 
 ```
-┌───────────────┐   REST API   ┌──────────────────────────────┐
-│  221b Gateway │◄────────────►│  Mission Controller           │
-│  (your client)│              │  + Input Guardrail            │
-└───────────────┘              │  (FastAPI + prompt validation) │
-                               └──────────────┬───────────────┘
-                                              │ Redis LPUSH
-                               ┌──────────────▼───────────────┐
-                               │  Mission Executor             │
-                               │  (Redis BLPOP consumer)       │
-                               │  + TaskPlanner (Ollama)       │
-                               └──────────────┬───────────────┘
-                                              │ JSON-RPC
-                      ┌───────────────────────┼───────────────────────┐
-              ┌───────▼──────┐  ┌─────────────▼──┐  ┌───────────────▼──┐
-              │ Agent 1      │  │ Agent 2         │  │ Agent N          │
-              │ (container)  │  │ (container)     │  │ (container)      │
-              └──────────────┘  └────────────────┘  └──────────────────┘
-                                              │ JSON-RPC
-                               ┌──────────────▼───────────────┐
-                               │  Output Guardrail             │
-                               │  + MCP Server                 │
-                               └──────────────┬───────────────┘
-                                              │ REST API
-                               ┌──────────────▼───────────────┐
-                               │  Tools & API Pool             │
-                               │  (real CRM, Dow Jones, etc.)  │
-                               └──────────────────────────────┘
+storage/
+├── documents/
+│   ├── sop/             # Standard Operating Procedures
+│   │   └── kyc_sop.md
+│   ├── rag/             # RAG corpus
+│   │   └── system_design.md
+│   └── skills/          # Agent skill definitions
+│       └── agent_skills.md
+└── seeds/               # Seed data for development/testing
+    ├── crm_customers.md
+    ├── identity_registry.md
+    ├── sanctions_pep_list.md
+    ├── jurisdiction_risk.md
+    └── adverse_media.md
 ```
 
-### Migration Path: Demo → Production
+---
 
-| Demo component | Production replacement |
-|---|---|
-| Shared `context` dict | Redis hash keyed by `mission_id` |
-| In-process agent calls | JSON-RPC over HTTP between containerised agents |
-| Mock `CRMTool` | Real CRM API (Oracle, Salesforce, etc.) |
-| Mock `ScreeningTool` | Dow Jones Risk & Compliance / Refinitiv World-Check API |
-| Mock `IdentityTool` | Jumio / Onfido / Veriff API |
-| File-based audit log | Immutable append-only database (PostgreSQL + WORM) |
-| File-based timeline | Redis Pub/Sub → WebSocket |
-| Single process | Docker/K8s with per-agent containers |
+## Database Schema
+
+### Core Tables
+
+- **missions** — mission records with status, plan, context, final decision
+- **audit_logs** — append-only WORM table (AMLO compliance)
+- **mission_phases** — per-phase timing for timeline reconstruction
+- **customers** — production CRM cache with full-text search
+- **screening_results** — historical hits with disposition tracking
+- **user_preferences** — key-value store for user settings
+
+See `infra/init.sql` for complete schema.
 
 ---
 
-## 9. Security & Compliance Considerations
+## Security & Compliance
 
-### 9.1 Data Handling
-- Customer PII never leaves the local environment in the demo
-- In production: all data encrypted in transit (TLS 1.3) and at rest (AES-256)
-- Audit logs are append-only; deletion requires MLRO + IT approval
+### Audit Trail (AMLO Section 20)
+- PostgreSQL `audit_logs` table is WORM (Write Once, Read Many)
+- Database trigger prevents UPDATE/DELETE on audit records
+- 5-year retention policy recorded in metadata
 
-### 9.2 LLM Safety
-- All LLM calls use a local model (Ollama) — no data sent to external APIs
-- System prompts include explicit scope constraints to prevent prompt injection
-- LLM outputs are always parsed and validated before being acted upon
-- Conservative defaults: if LLM output is ambiguous, escalate rather than approve
+### LLM Safety
+- Temperature 0.05 — near-deterministic outputs
+- Rule-based anchoring — LLM decisions validated against policy rules
+- Conservative defaults — escalate rather than approve when uncertain
+- REJECT reserved exclusively for confirmed sanctions matches
 
-### 9.3 Human-in-the-Loop
-The system is designed as decision-support, not decision-replacement:
-- All TRUE_POSITIVE alerts require human review before account action
-- ESCALATE_TO_MLRO decisions await human approval before proceeding
-- STR filing requires MLRO sign-off before JFIU submission
-
-### 9.4 Regulatory Compliance
-| Requirement | Implementation |
-|---|---|
-| AMLO S.20 — 5-year record retention | `audit_logs/` JSON files + `retention_policy` field |
-| HKMA — risk-based approach | Risk scoring in Phase 2 calibrates screening depth |
-| HKMA — CDD for PEPs | `pep_self_declared` triggers EDD path automatically |
-| SFC — AML controls | Decision audit trail captures rationale for every ruling |
-| FATF — high-risk jurisdictions | Hardcoded jurisdiction risk list in `CRMTool` |
+### Human-in-the-Loop
+- ESCALATE_TO_MLRO decisions require human review
+- STR filing requires compliance officer approval
+- EDD procedures flag for senior management sign-off
 
 ---
 
-## 10. Technology Stack
+## KYC SOP Phase Coverage
 
-| Layer | Technology | Why |
-|---|---|---|
-| LLM runtime | Ollama | Local, no data egress, privacy-safe |
-| LLM model | qwen3.5:9b | Strong reasoning, efficient on local hardware |
-| Language | Python 3.11+ | Mature ecosystem, async support, type hints |
-| Terminal UI | Rich | Professional output with no web dependency |
-| Data format | JSON | Universal, human-readable, auditable |
-| Orchestration | Custom Python | Full control, no framework risk |
-| Timeline output | JSON file | UI-agnostic, no additional infrastructure |
+| SOP Step | Agent | Description | LLM Used |
+|----------|-------|-------------|----------|
+| — | IntentParser | Free-form intent classification + SOP validation | Yes |
+| 1.1 | DataCollectionAgent | Event classification | Yes |
+| 1.2 | DataCollectionAgent | CRM data retrieval | — |
+| 1.3 | DataCollectionAgent | Identity verification | — |
+| 2.1 | RiskAssessmentAgent | Risk scoring + narrative | Yes |
+| 3.1 | AereveScreeningAgent | Name variant generation | — |
+| 3.2 | AereveScreeningAgent | Sanctions/PEP screening | — |
+| 4.1 | AlertReviewAgent | Alert triage | — |
+| 4.2 | AlertReviewAgent | Match investigation | Yes |
+| 4.3 | AlertReviewAgent | Enhanced Due Diligence | Yes |
+| 5.1 | DecisionAgent | Final decision | Yes |
+| 5.2 | DecisionAgent | MLRO escalation | Yes |
+| 5.3 | DecisionAgent | STR preparation | Yes |
+| 6.1 | DocumentationAgent | Audit logging | — |
+| 6.2 | DocumentationAgent | Stakeholder notifications | — |
 
 ---
 
-## 11. Known Limitations (Demo Phase)
+## Technology Stack
 
-| Limitation | Impact | Production fix |
-|---|---|---|
-| Mock tools | No real sanctions data | Replace with vendor APIs |
-| Single-process pipeline | No parallelism | Containerised agents via JSON-RPC |
-| Local LLM only | Slower than cloud models | Optional cloud LLM endpoint |
-| File-based timeline | Requires polling | Redis Pub/Sub + WebSocket |
-| English-only | Cannot screen non-Latin scripts natively | Multilingual model or translation preprocessing |
-| No retry logic in agents | Failed LLM call = empty result | Add retry with exponential backoff |
+| Layer | Technology | Purpose |
+|-------|-----------|---------|
+| LLM | Ollama + qwen3.5:9b | Local inference engine |
+| API | FastAPI + Uvicorn | HTTP/WebSocket gateway |
+| Protocol | MCP (Model Context Protocol) | Agent/tool communication |
+| DB | PostgreSQL 16 | Structured data + audit logs |
+| Cache | Redis 7 | Context store + pub/sub |
+| Objects | MinIO | Document/file storage |
+| Vectors | Qdrant | Semantic memory + RAG |
+| Config | pydantic-settings | Centralised configuration |
+| UI | Rich | Terminal output (demo) |
+| Container | Docker Compose | Orchestration |
