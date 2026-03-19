@@ -32,12 +32,12 @@ logger = logging.getLogger("tools_mcp")
 def create_server() -> Server:
     server = Server("kyc-tools")
 
-    # Lazy-load tools to avoid import issues
+    # Lazy-load and instantiate tools to avoid import issues at startup
     def _get_tools():
         from tools.crm_tool import CRMTool
         from tools.identity_tool import IdentityVerificationTool
         from tools.screening_tool import SanctionsScreeningTool
-        return CRMTool, IdentityVerificationTool, SanctionsScreeningTool
+        return CRMTool(), IdentityVerificationTool(), SanctionsScreeningTool()
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:
@@ -164,25 +164,25 @@ def create_server() -> Server:
 
             elif name == "identity_verify":
                 result = IdentityVerificationTool.verify_identity(
-                    id_type=arguments["id_type"],
                     id_number=arguments["id_number"],
                     full_name=arguments["full_name"],
-                    date_of_birth=arguments.get("date_of_birth"),
+                    dob=arguments.get("date_of_birth", ""),
                 )
                 return [TextContent(type="text", text=json.dumps(result, default=str))]
 
             elif name == "identity_verify_ubo":
                 result = IdentityVerificationTool.verify_beneficial_owner_structure(
-                    arguments["customer_id"],
-                    arguments.get("company_name", ""),
+                    entity_name=arguments.get("company_name", arguments["customer_id"]),
                 )
                 return [TextContent(type="text", text=json.dumps(result, default=str))]
 
             elif name == "screening_screen":
                 result = SanctionsScreeningTool.screen(
-                    name_variants=arguments["name_variants"],
-                    date_of_birth=arguments.get("date_of_birth"),
-                    nationality=arguments.get("nationality"),
+                    queries=arguments["name_variants"],
+                    customer_data={
+                        "date_of_birth": arguments.get("date_of_birth", ""),
+                        "nationality": arguments.get("nationality", ""),
+                    },
                 )
                 return [TextContent(type="text", text=json.dumps(result, default=str))]
 
