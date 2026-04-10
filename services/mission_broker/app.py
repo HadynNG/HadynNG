@@ -91,8 +91,8 @@ def create_app() -> FastAPI:
         )
         app.state.memory = MemoryManager(
             redis_url=settings.redis_url,
-            qdrant_host=settings.qdrant_host,
-            qdrant_port=settings.qdrant_port,
+            milvus_host=settings.milvus_host,
+            milvus_port=settings.milvus_port,
             postgres_dsn=settings.postgres_dsn,
         )
         app.state.active_missions: dict[str, dict] = {}

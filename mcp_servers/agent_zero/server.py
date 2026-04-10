@@ -2,24 +2,31 @@
 AgentZero MCP Server — central agent dispatcher.
 
 This MCP server wraps all KYC agents and exposes them as callable tools
-via the Model Context Protocol. The Orchestrator connects to this server
+via the Model Context Protocol.  The Orchestrator connects to this server
 as an MCP client and dispatches agent execution through it.
 
 Architecture:
   Prompt → Mission Broker → Orchestrator → AgentZero MCP → Agents → Tool MCP → Tools
 
-Each agent is exposed as an MCP tool:
+Pipeline execution now uses a LangGraph StateGraph (orchestrator/kyc_graph.py)
+instead of a manual for-loop.  Each agent is a typed node; conditional edges
+handle DataCollection failure and ensure documentation always runs last.
+
+Individual agent tools (run_data_collection, run_risk_assessment, …) still call
+agents directly for single-phase invocations.  run_full_pipeline delegates to
+graph.invoke() so the full pipeline benefits from LangGraph state management,
+typed schema, and optional Redis checkpointing.
+
+Tools exposed:
   - run_data_collection
   - run_risk_assessment
   - run_screening
   - run_alert_review
   - run_decision
   - run_documentation
-  - run_full_pipeline (convenience: runs all agents in sequence)
-
-The server also provides:
-  - agent_status: check which agents are available
-  - get_context: retrieve current mission context
+  - run_full_pipeline  ← uses LangGraph graph.invoke()
+  - agent_status
+  - get_context
 """
 import json
 import logging
@@ -37,12 +44,11 @@ _ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_ROOT))
 
 from config import settings
-from services.llm_gateway import LLMGateway
 from services.memory import MemoryManager
 
 logger = logging.getLogger("agent_zero_mcp")
 
-# ── Agent Registry ───────────────────────────────────────────────────────────
+# ── Agent Registry (for individual-phase tools) ───────────────────────────────
 
 PIPELINE_ORDER = [
     "DataCollectionAgent",
@@ -54,50 +60,41 @@ PIPELINE_ORDER = [
 ]
 
 
-def _load_agents() -> dict:
-    """Lazy-load all agent classes."""
+def _build_agents() -> dict:
+    """Instantiate all agents with current settings (no llm_gateway/memory in MCP mode)."""
     from agents import (
         AlertReviewAgent,
+        AereveScreeningAgent,
         DataCollectionAgent,
         DecisionAgent,
         DocumentationAgent,
         RiskAssessmentAgent,
-        AereveScreeningAgent,
     )
     return {
-        "DataCollectionAgent": DataCollectionAgent,
-        "RiskAssessmentAgent": RiskAssessmentAgent,
-        "AereveScreeningAgent": AereveScreeningAgent,
-        "AlertReviewAgent": AlertReviewAgent,
-        "DecisionAgent": DecisionAgent,
-        "DocumentationAgent": DocumentationAgent,
+        "DataCollectionAgent":  DataCollectionAgent(model=settings.ollama_model, ollama_host=settings.ollama_host),
+        "RiskAssessmentAgent":  RiskAssessmentAgent(model=settings.ollama_model, ollama_host=settings.ollama_host),
+        "AereveScreeningAgent": AereveScreeningAgent(model=settings.ollama_model, ollama_host=settings.ollama_host),
+        "AlertReviewAgent":     AlertReviewAgent(model=settings.ollama_model, ollama_host=settings.ollama_host),
+        "DecisionAgent":        DecisionAgent(model=settings.ollama_model, ollama_host=settings.ollama_host),
+        "DocumentationAgent":   DocumentationAgent(model=settings.ollama_model, ollama_host=settings.ollama_host),
     }
 
 
-def _build_agents() -> dict:
-    """Instantiate all agents with current settings."""
-    registry = _load_agents()
-    return {
-        name: cls(model=settings.ollama_model, ollama_host=settings.ollama_host)
-        for name, cls in registry.items()
-    }
-
-
-# ── MCP Server Definition ───────────────────────────────────────────────────
+# ── MCP Server Definition ─────────────────────────────────────────────────────
 
 def create_server() -> Server:
     server = Server("agent-zero")
     memory = MemoryManager(
         redis_url=settings.redis_url,
-        qdrant_host=settings.qdrant_host,
-        qdrant_port=settings.qdrant_port,
+        milvus_host=settings.milvus_host,
+        milvus_port=settings.milvus_port,
     )
 
-    # ── Tool definitions ─────────────────────────────────────────────────
+    # ── Tool definitions ───────────────────────────────────────────────────
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:
-        tools = [
+        return [
             Tool(
                 name="run_data_collection",
                 description="Phase 1: Classify trigger event, collect customer data from CRM, verify identity documents.",
@@ -105,7 +102,7 @@ def create_server() -> Server:
                     "type": "object",
                     "properties": {
                         "mission_id": {"type": "string", "description": "Mission identifier"},
-                        "context": {"type": "object", "description": "Current mission context dict"},
+                        "context":    {"type": "object", "description": "Current mission context dict"},
                     },
                     "required": ["mission_id", "context"],
                 },
@@ -117,7 +114,7 @@ def create_server() -> Server:
                     "type": "object",
                     "properties": {
                         "mission_id": {"type": "string"},
-                        "context": {"type": "object"},
+                        "context":    {"type": "object"},
                     },
                     "required": ["mission_id", "context"],
                 },
@@ -129,7 +126,7 @@ def create_server() -> Server:
                     "type": "object",
                     "properties": {
                         "mission_id": {"type": "string"},
-                        "context": {"type": "object"},
+                        "context":    {"type": "object"},
                     },
                     "required": ["mission_id", "context"],
                 },
@@ -141,7 +138,7 @@ def create_server() -> Server:
                     "type": "object",
                     "properties": {
                         "mission_id": {"type": "string"},
-                        "context": {"type": "object"},
+                        "context":    {"type": "object"},
                     },
                     "required": ["mission_id", "context"],
                 },
@@ -153,7 +150,7 @@ def create_server() -> Server:
                     "type": "object",
                     "properties": {
                         "mission_id": {"type": "string"},
-                        "context": {"type": "object"},
+                        "context":    {"type": "object"},
                     },
                     "required": ["mission_id", "context"],
                 },
@@ -165,19 +162,23 @@ def create_server() -> Server:
                     "type": "object",
                     "properties": {
                         "mission_id": {"type": "string"},
-                        "context": {"type": "object"},
+                        "context":    {"type": "object"},
                     },
                     "required": ["mission_id", "context"],
                 },
             ),
             Tool(
                 name="run_full_pipeline",
-                description="Run all 6 agent phases in sequence (DataCollection → Risk → Screening → AlertReview → Decision → Documentation).",
+                description=(
+                    "Run all 6 agent phases in sequence via LangGraph StateGraph "
+                    "(DataCollection → Risk → Screening → AlertReview → Decision → Documentation). "
+                    "Conditional edge: DataCollection failure routes directly to Documentation."
+                ),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "mission_id": {"type": "string"},
-                        "context": {"type": "object"},
+                        "context":    {"type": "object"},
                     },
                     "required": ["mission_id", "context"],
                 },
@@ -199,9 +200,8 @@ def create_server() -> Server:
                 },
             ),
         ]
-        return tools
 
-    # ── Tool execution ───────────────────────────────────────────────────
+    # ── Tool execution ─────────────────────────────────────────────────────
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict) -> list[TextContent]:
@@ -210,10 +210,11 @@ def create_server() -> Server:
                 return [TextContent(
                     type="text",
                     text=json.dumps({
-                        "agents": PIPELINE_ORDER,
-                        "model": settings.ollama_model,
-                        "ollama_host": settings.ollama_host,
-                        "status": "ready",
+                        "agents":       PIPELINE_ORDER,
+                        "model":        settings.ollama_model,
+                        "ollama_host":  settings.ollama_host,
+                        "orchestrator": "LangGraph StateGraph",
+                        "status":       "ready",
                     }),
                 )]
 
@@ -225,34 +226,47 @@ def create_server() -> Server:
                     text=json.dumps(ctx or {"error": "No context found"}, default=str),
                 )]
 
-            # Agent execution tools
+            # All remaining tools need mission_id and context
             mission_id = arguments["mission_id"]
-            context = arguments["context"]
-
-            agents = _build_agents()
+            context    = arguments["context"]
 
             if name == "run_full_pipeline":
-                result = _run_pipeline(agents, context, memory, mission_id)
+                # ── LangGraph path ────────────────────────────────────────
+                from orchestrator.kyc_graph import build_graph
+
+                graph = build_graph(
+                    model=settings.ollama_model,
+                    ollama_host=settings.ollama_host,
+                    redis_url=settings.redis_url,
+                )
+                # Invoke the full StateGraph; returns final merged state
+                result = graph.invoke(
+                    context,
+                    config={"configurable": {"thread_id": mission_id}},
+                )
+
+                memory.update_context(mission_id, result)
+                result["status"] = result.get("status", "COMPLETE")
+
             else:
+                # ── Individual-agent path ─────────────────────────────────
                 agent_map = {
                     "run_data_collection": "DataCollectionAgent",
                     "run_risk_assessment": "RiskAssessmentAgent",
-                    "run_screening": "AereveScreeningAgent",
-                    "run_alert_review": "AlertReviewAgent",
-                    "run_decision": "DecisionAgent",
-                    "run_documentation": "DocumentationAgent",
+                    "run_screening":       "AereveScreeningAgent",
+                    "run_alert_review":    "AlertReviewAgent",
+                    "run_decision":        "DecisionAgent",
+                    "run_documentation":   "DocumentationAgent",
                 }
                 agent_name = agent_map.get(name)
-                if not agent_name or agent_name not in agents:
+                if not agent_name:
                     return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
 
-                agent = agents[agent_name]
+                agents = _build_agents()
+                agent  = agents[agent_name]
                 result = agent.run(context)
 
-                # Store updated context
                 memory.update_context(mission_id, result)
-
-                # Store agent insight for cross-mission learning
                 _store_phase_insight(memory, agent_name, mission_id, result)
 
             return [TextContent(
@@ -270,34 +284,8 @@ def create_server() -> Server:
     return server
 
 
-def _run_pipeline(agents: dict, context: dict, memory: MemoryManager, mission_id: str) -> dict:
-    """Execute all agents in sequence."""
-    for agent_name in PIPELINE_ORDER:
-        agent = agents.get(agent_name)
-        if not agent:
-            continue
-
-        try:
-            context = agent.run(context)
-            memory.update_context(mission_id, context)
-            _store_phase_insight(memory, agent_name, mission_id, context)
-        except Exception as e:
-            context.setdefault("audit_log", []).append({
-                "timestamp": datetime.utcnow().isoformat() + "Z",
-                "agent": agent_name,
-                "level": "ERROR",
-                "message": str(e),
-            })
-            if agent_name == "DataCollectionAgent":
-                context["status"] = "FAILED"
-                break
-
-    context["status"] = context.get("status", "COMPLETE")
-    return context
-
-
 def _store_phase_insight(memory: MemoryManager, agent_name: str, mission_id: str, context: dict):
-    """Store a learning insight after each phase for cross-mission recall."""
+    """Store a learning insight after a phase for cross-mission recall."""
     insights = {
         "RiskAssessmentAgent": (
             f"Risk assessment: level={context.get('risk_level')}, "
@@ -317,13 +305,13 @@ def _store_phase_insight(memory: MemoryManager, agent_name: str, mission_id: str
             agent_name, mission_id, insight,
             metadata={
                 "customer_id": context.get("customer_id"),
-                "risk_level": context.get("risk_level"),
-                "decision": context.get("final_decision"),
+                "risk_level":  context.get("risk_level"),
+                "decision":    context.get("final_decision"),
             },
         )
 
 
-# ── Entry point ──────────────────────────────────────────────────────────────
+# ── Entry point ───────────────────────────────────────────────────────────────
 
 async def main():
     server = create_server()

@@ -84,12 +84,12 @@ class Settings(BaseSettings):
     def minio_endpoint(self) -> str:
         return f"{self.minio_host}:{self.minio_port}"
 
-    # ── Qdrant ───────────────────────────────────────────────────────────────
-    qdrant_host: str = "localhost"
-    qdrant_port: int = 6333
-    qdrant_grpc_port: int = 6334
-    qdrant_collection_memory: str = "agent_memory"
-    qdrant_collection_rag: str = "rag_documents"
+    # ── Milvus ───────────────────────────────────────────────────────────────
+    milvus_host: str = "localhost"
+    milvus_port: int = 19530      # gRPC / MilvusClient port
+    milvus_http_port: int = 9091  # metrics / health port
+    milvus_collection_memory: str = "agent_memory"
+    milvus_collection_rag: str = "rag_documents"
 
     # ── Mission Broker ───────────────────────────────────────────────────────
     broker_host: str = "0.0.0.0"

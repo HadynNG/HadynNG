@@ -4,14 +4,22 @@ Mission Executor — the central coordinator of the agentic platform.
 Responsibilities:
 1. Accept a mission payload (customer_id + event + description).
 2. Use TaskPlanner (LLM) to build an execution plan.
-3. Dispatch agents via AgentZero MCP (production) or directly (demo).
-4. Track progress via MissionTimeline (for UI consumption).
+3. Drive agents via a LangGraph StateGraph (graph.stream()), replacing the
+   previous manual for-loop over PIPELINE_ORDER.
+4. Track progress via MissionTimeline (external to the graph — managed here).
 5. Persist context in Redis/memory service when available.
 6. Display rich chain-of-thought output throughout.
 
 Architecture paths:
-  Demo mode:   Orchestrator → Agents (direct Python calls)
-  Production:  Orchestrator → AgentZero MCP → Agents → Tool MCP → Tools
+  Demo mode:   Orchestrator → LangGraph graph (direct agent calls)
+  Production:  Orchestrator → LangGraph graph (agents → Tool MCP → Tools)
+               + Redis checkpointing for mission resumability
+
+How LangGraph replaces the for-loop:
+  - graph.stream() yields {node_name: updated_state_keys} after each node.
+  - MissionExecutor intercepts each chunk: completes the timeline phase,
+    publishes to memory, then pre-starts the next expected phase.
+  - Conditional edge: DataCollection FAILED → documentation (skips phases 2-5).
 """
 import sys
 from datetime import datetime
@@ -19,34 +27,16 @@ from typing import Optional
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
 from rich.rule import Rule
 from rich.table import Table
 
 from .task_planner import TaskPlanner
 from .mission_timeline import MissionTimeline
-from agents import (
-    AlertReviewAgent,
-    DataCollectionAgent,
-    DecisionAgent,
-    DocumentationAgent,
-    RiskAssessmentAgent,
-    AereveScreeningAgent,
-)
+from .kyc_graph import build_graph, NODE_TO_AGENT
 
 console = Console()
 
-# Registry mapping agent names → classes
-AGENT_REGISTRY = {
-    "DataCollectionAgent": DataCollectionAgent,
-    "RiskAssessmentAgent": RiskAssessmentAgent,
-    "AereveScreeningAgent": AereveScreeningAgent,
-    "AlertReviewAgent": AlertReviewAgent,
-    "DecisionAgent": DecisionAgent,
-    "DocumentationAgent": DocumentationAgent,
-}
-
-# Canonical execution order (always enforced)
+# Canonical pipeline order — used to pre-start timeline phases
 PIPELINE_ORDER = [
     "DataCollectionAgent",
     "RiskAssessmentAgent",
@@ -55,6 +45,16 @@ PIPELINE_ORDER = [
     "DecisionAgent",
     "DocumentationAgent",
 ]
+
+# Next expected agent after each one (for timeline pre-start)
+_NEXT_AGENT: dict[str, Optional[str]] = {
+    "DataCollectionAgent":  "RiskAssessmentAgent",
+    "RiskAssessmentAgent":  "AereveScreeningAgent",
+    "AereveScreeningAgent": "AlertReviewAgent",
+    "AlertReviewAgent":     "DecisionAgent",
+    "DecisionAgent":        "DocumentationAgent",
+    "DocumentationAgent":   None,
+}
 
 
 class MissionExecutor:
@@ -87,23 +87,10 @@ class MissionExecutor:
         self._memory = memory
         self.planner = TaskPlanner(model=model, ollama_host=ollama_host)
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    def _build_agents(self) -> dict:
-        return {
-            name: cls(
-                model=self.model,
-                ollama_host=self.ollama_host,
-                llm_gateway=self._llm_gateway,
-                memory=self._memory,
-            )
-            for name, cls in AGENT_REGISTRY.items()
-        }
+    # ── Helpers ────────────────────────────────────────────────────────────
 
     def _print_banner(self, mission_payload: dict):
-        mode = "Production (LLM Gateway)" if self._llm_gateway else "Demo (Direct Ollama)"
+        mode = "Production (LLM Gateway + LangGraph)" if self._llm_gateway else "Demo (Direct Ollama + LangGraph)"
         console.print()
         console.print(Rule("[bold magenta]AGENTIC KYC PLATFORM[/bold magenta]", style="magenta"))
         console.print(
@@ -137,21 +124,21 @@ class MissionExecutor:
         table.add_column("Value")
 
         rows = [
-            ("Customer", context.get("customer_data", {}).get("full_name", "N/A")),
-            ("Customer ID", context.get("customer_id", "N/A")),
-            ("Event Type", context.get("event_type", "N/A")),
-            ("Identity Verified", context.get("identity_verification", {}).get("status", "N/A")),
-            ("Risk Level", context.get("risk_level", "N/A")),
-            ("Risk Score", str(context.get("risk_score", "N/A"))),
-            ("Screening Hits", str(context.get("screening_results", {}).get("total_hits", 0))),
-            ("True Positives", str(context.get("step_4_2", {}).get("true_positives", 0))),
-            ("EDD Required", str(context.get("edd_required", False))),
-            ("STR Filed", str(context.get("step_5_3", {}).get("str_filed", False))),
-            ("MLRO Escalated", str(context.get("step_5_2", {}).get("escalated", False))),
-            ("Final Decision", f"[bold {color}]{decision}[/bold {color}]"),
-            ("Audit ID", context.get("audit_id", "N/A")),
-            ("Audit Log", context.get("audit_log_file", "N/A")),
-            ("Total Time", f"{elapsed:.1f}s"),
+            ("Customer",         context.get("customer_data", {}).get("full_name", "N/A")),
+            ("Customer ID",      context.get("customer_id", "N/A")),
+            ("Event Type",       context.get("event_type", "N/A")),
+            ("Identity Verified",context.get("identity_verification", {}).get("status", "N/A")),
+            ("Risk Level",       context.get("risk_level", "N/A")),
+            ("Risk Score",       str(context.get("risk_score", "N/A"))),
+            ("Screening Hits",   str(context.get("screening_results", {}).get("total_hits", 0))),
+            ("True Positives",   str(context.get("step_4_2", {}).get("true_positives", 0))),
+            ("EDD Required",     str(context.get("edd_required", False))),
+            ("STR Filed",        str(context.get("step_5_3", {}).get("str_filed", False))),
+            ("MLRO Escalated",   str(context.get("step_5_2", {}).get("escalated", False))),
+            ("Final Decision",   f"[bold {color}]{decision}[/bold {color}]"),
+            ("Audit ID",         context.get("audit_id", "N/A")),
+            ("Audit Log",        context.get("audit_log_file", "N/A")),
+            ("Total Time",       f"{elapsed:.1f}s"),
         ]
 
         for field, value in rows:
@@ -160,13 +147,17 @@ class MissionExecutor:
         console.print(table)
         console.print()
 
-    # ------------------------------------------------------------------
-    # Main execution loop
-    # ------------------------------------------------------------------
+    # ── Main execution loop ────────────────────────────────────────────────
 
     def execute(self, mission_payload: dict) -> dict:
         """
-        Execute a complete KYC screening mission.
+        Execute a complete KYC screening mission via LangGraph StateGraph.
+
+        The StateGraph streams one chunk per completed node.  For each chunk:
+          1. The timeline phase is completed.
+          2. Memory is updated (Redis).
+          3. A real-time pub/sub event is published for WebSocket consumers.
+          4. The next timeline phase is pre-started.
 
         Args:
             mission_payload: Dict with keys:
@@ -180,17 +171,17 @@ class MissionExecutor:
         start_time = datetime.utcnow()
         self._print_banner(mission_payload)
 
-        # --- Step A: Build execution context ---
+        # ── Step A: Build initial context ──────────────────────────────────
         customer_id = mission_payload["customer_id"]
-        context = {
-            "customer_id": customer_id,
-            "event": mission_payload.get("event", {}),
-            "mission_payload": mission_payload,
-            "audit_log": [],
-            "status": "IN_PROGRESS",
+        context: dict = {
+            "customer_id":    customer_id,
+            "event":          mission_payload.get("event", {}),
+            "mission_payload":mission_payload,
+            "audit_log":      [],
+            "status":         "IN_PROGRESS",
         }
 
-        # --- Step B: Initialise timeline ---
+        # ── Step B: Initialise timeline ────────────────────────────────────
         mission_ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
         mission_id = f"{customer_id}-{mission_ts}"
         timeline = MissionTimeline(
@@ -199,15 +190,13 @@ class MissionExecutor:
             customer_name=mission_payload.get("customer_name", customer_id),
             model=self.model,
         )
-        context["timeline"] = timeline
         context["timeline_file"] = timeline.filepath
-        context["mission_id"] = mission_id
+        context["mission_id"]    = mission_id
 
-        # Persist initial context in memory service
         if self._memory:
             self._memory.set_context(mission_id, context)
 
-        # --- Step C: Plan the mission using LLM ---
+        # ── Step C: Plan the mission ───────────────────────────────────────
         mission_description = mission_payload.get(
             "mission_description",
             f"KYC name screening for customer {customer_id} "
@@ -229,84 +218,89 @@ class MissionExecutor:
 
         context["mission_plan"] = plan
 
-        # Backfill mission_id into timeline if available
         if plan.get("mission_id"):
             timeline._data["mission_id"] = plan["mission_id"]
             timeline._write()
 
-        # --- Step D: Build agents ---
-        agents = self._build_agents()
-
-        # --- Step E: Execute pipeline in canonical order ---
-        console.print()
-        console.print(Rule("[bold cyan]PIPELINE EXECUTION STARTING[/bold cyan]", style="cyan"))
-
-        for agent_name in PIPELINE_ORDER:
-            agent = agents.get(agent_name)
-            if not agent:
-                console.print(f"[red]Agent not found: {agent_name}[/red]")
-                continue
-
-            timeline.start_phase(agent_name)
+        # ── Step D: Build LangGraph and stream pipeline ────────────────────
+        redis_url = None
+        if self._memory:
             try:
-                context = agent.run(context)
-            except Exception as e:
-                console.print(f"\n[red]Agent {agent_name} raised an error: {e}[/red]")
-                context["audit_log"].append({
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
-                    "agent": agent_name,
-                    "level": "ERROR",
-                    "message": str(e),
-                })
-                timeline.complete_phase(agent_name, summary=f"Agent error: {e}", status="FAILED")
-                if agent_name == "DataCollectionAgent":
-                    context["status"] = "FAILED"
-                    timeline.fail_mission(f"Fatal error in {agent_name}: {e}")
-                    break
-                continue
+                from config import settings
+                redis_url = settings.redis_url
+            except Exception:
+                pass
 
-            # Build a compact summary for the timeline from context
+        graph = build_graph(
+            model=self.model,
+            ollama_host=self.ollama_host,
+            llm_gateway=self._llm_gateway,
+            memory=self._memory,
+            redis_url=redis_url,
+        )
+
+        console.print()
+        console.print(Rule("[bold cyan]PIPELINE EXECUTION STARTING (LangGraph)[/bold cyan]", style="cyan"))
+
+        # Pre-start the first timeline phase
+        timeline.start_phase("DataCollectionAgent")
+
+        # Stream config — only attach thread_id when a checkpointer is present
+        stream_config = {}
+        if redis_url:
+            stream_config = {"configurable": {"thread_id": mission_id}}
+
+        # ── Step E: Stream graph, one chunk per completed node ─────────────
+        for chunk in graph.stream(context, config=stream_config):
+            node_name, updates = next(iter(chunk.items()))
+            agent_name = NODE_TO_AGENT.get(node_name, node_name)
+
+            # Merge node output into local context
+            context.update(updates)
+
+            # Build timeline summary from updated context
             phase_summary = self._phase_summary(agent_name, context)
             phase_outputs = self._phase_outputs(agent_name, context)
             timeline.complete_phase(agent_name, summary=phase_summary, key_outputs=phase_outputs)
 
-            # Persist updated context after each phase
+            # Persist to memory after each phase
             if self._memory:
                 self._memory.update_context(mission_id, {
-                    "status": context.get("status"),
-                    "current_phase": agent_name,
-                    "risk_level": context.get("risk_level"),
-                    "risk_score": context.get("risk_score"),
+                    "status":         context.get("status"),
+                    "current_phase":  agent_name,
+                    "risk_level":     context.get("risk_level"),
+                    "risk_score":     context.get("risk_score"),
                     "final_decision": context.get("final_decision"),
                 })
-                # Publish real-time event for UI
                 self._memory.publish_event(f"mission:{mission_id}", {
-                    "event": "phase_complete",
-                    "phase": agent_name,
+                    "event":   "phase_complete",
+                    "phase":   agent_name,
                     "summary": phase_summary,
                 })
 
-            # Stop pipeline early on hard escalations
-            if context.get("status", "").startswith("ESCALATED_") and agent_name == "DataCollectionAgent":
-                console.print(f"[red]Pipeline halted at {agent_name}: {context['status']}[/red]")
-                timeline.fail_mission(f"Escalated: {context['status']}")
-                break
+            # Pre-start next phase for timeline continuity
+            # Handle DataCollection failure: jump straight to Documentation
+            if agent_name == "DataCollectionAgent" and context.get("status", "").upper() in ("FAILED", "ERROR"):
+                timeline.start_phase("DocumentationAgent")
+            else:
+                next_agent = _NEXT_AGENT.get(agent_name)
+                if next_agent:
+                    timeline.start_phase(next_agent)
 
-        # --- Step F: Final report ---
+        # ── Step F: Final report ───────────────────────────────────────────
         elapsed = (datetime.utcnow() - start_time).total_seconds()
-        context["status"] = "COMPLETE"
+        context["status"]          = "COMPLETE"
         context["elapsed_seconds"] = elapsed
         timeline.complete_mission(context)
 
-        # Persist final result
         if self._memory:
             self._memory.update_context(mission_id, {
-                "status": "COMPLETE",
-                "final_decision": context.get("final_decision"),
-                "elapsed_seconds": elapsed,
+                "status":           "COMPLETE",
+                "final_decision":   context.get("final_decision"),
+                "elapsed_seconds":  elapsed,
             })
             self._memory.publish_event(f"mission:{mission_id}", {
-                "event": "completed",
+                "event":    "completed",
                 "decision": context.get("final_decision"),
             })
 
@@ -314,13 +308,10 @@ class MissionExecutor:
         console.print(f"  [dim]Timeline written to: {timeline.filepath}[/dim]")
         return context
 
-    # ------------------------------------------------------------------
-    # Timeline summary helpers
-    # ------------------------------------------------------------------
+    # ── Timeline summary helpers ───────────────────────────────────────────
 
     @staticmethod
     def _phase_summary(agent_name: str, context: dict) -> str:
-        """Return a one-line human-readable summary for the timeline."""
         summaries = {
             "DataCollectionAgent": (
                 f"Customer {context.get('customer_data', {}).get('full_name', '?')} verified — "
@@ -351,10 +342,9 @@ class MissionExecutor:
 
     @staticmethod
     def _phase_outputs(agent_name: str, context: dict) -> dict:
-        """Return key structured outputs for the timeline phase."""
         outputs = {
             "DataCollectionAgent": {
-                "identity_status": context.get("identity_verification", {}).get("status"),
+                "identity_status":   context.get("identity_verification", {}).get("status"),
                 "jurisdiction_risk": context.get("jurisdiction_risk", {}).get("risk_level"),
             },
             "RiskAssessmentAgent": {
@@ -362,23 +352,23 @@ class MissionExecutor:
                 "risk_score": context.get("risk_score"),
             },
             "AereveScreeningAgent": {
-                "total_hits": context.get("screening_results", {}).get("total_hits", 0),
+                "total_hits":          context.get("screening_results", {}).get("total_hits", 0),
                 "adverse_media_count": len(context.get("adverse_media", [])),
-                "lists_checked": context.get("screening_results", {}).get("lists_checked", []),
+                "lists_checked":       context.get("screening_results", {}).get("lists_checked", []),
             },
             "AlertReviewAgent": {
-                "triaged": context.get("step_4_1", {}).get("triaged_count", 0),
+                "triaged":        context.get("step_4_1", {}).get("triaged_count", 0),
                 "true_positives": context.get("step_4_2", {}).get("true_positives", 0),
-                "false_positives": context.get("step_4_2", {}).get("false_positives", 0),
-                "edd_required": context.get("edd_required", False),
+                "false_positives":context.get("step_4_2", {}).get("false_positives", 0),
+                "edd_required":   context.get("edd_required", False),
             },
             "DecisionAgent": {
-                "decision": context.get("final_decision"),
+                "decision":     context.get("final_decision"),
                 "requires_str": context.get("requires_str", False),
-                "escalated": context.get("step_5_2", {}).get("escalated", False),
+                "escalated":    context.get("step_5_2", {}).get("escalated", False),
             },
             "DocumentationAgent": {
-                "audit_id": context.get("audit_id"),
+                "audit_id":       context.get("audit_id"),
                 "audit_log_file": context.get("audit_log_file"),
             },
         }

@@ -5,12 +5,14 @@
 #   - PostgreSQL  : audit logs, mission records, structured data
 #   - Redis       : mission context, caching, pub/sub
 #   - MinIO       : document storage (SOP, RAG corpus, audit reports)
-#   - Qdrant      : vector DB (agent memory, RAG embeddings)
+#                   also used by Milvus for index/log storage
+#   - etcd        : Milvus metadata store
+#   - Milvus      : vector DB (agent memory, RAG embeddings)
 #   - Ollama      : LLM inference engine
 #
 # Application services:
 #   - mission-broker   : FastAPI gateway (HTTP API)
-#   - agent-zero-mcp   : central MCP server wrapping all agents
+#   - agent-zero-mcp   : central MCP server wrapping all agents (LangGraph)
 #   - tools-mcp        : MCP server for external tool integrations
 ###############################################################################
 version: "3.9"
@@ -71,19 +73,57 @@ services:
       interval: 10s
       retries: 5
 
-  qdrant:
-    image: qdrant/qdrant:latest
-    container_name: hadynng-qdrant
+  # ── Milvus dependencies ───────────────────────────────────────────────────
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.14
+    container_name: hadynng-etcd
     restart: unless-stopped
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    command: >
+      etcd
+      --advertise-client-urls=http://etcd:2379
+      --listen-client-urls=http://0.0.0.0:2379
+      --data-dir=/etcd
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "2379:2379"
     volumes:
-      - qdrant_data:/qdrant/storage
+      - etcd_data:/etcd
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:6333/healthz || exit 1"]
+      test: ["CMD", "etcdctl", "endpoint", "health"]
       interval: 10s
       retries: 5
+
+  milvus:
+    image: milvusdb/milvus:v2.4-latest
+    container_name: hadynng-milvus
+    restart: unless-stopped
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-hadynng}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-changeme_in_production}
+      MINIO_BUCKET_NAME: milvus-storage
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    volumes:
+      - milvus_data:/var/lib/milvus
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9091/healthz || exit 1"]
+      interval: 10s
+      retries: 10
+      start_period: 30s
 
   ollama:
     image: ollama/ollama:latest
@@ -120,6 +160,7 @@ services:
         mc mb --ignore-existing local/$${MINIO_BUCKET_DOCUMENTS:-documents};
         mc mb --ignore-existing local/$${MINIO_BUCKET_AUDIT:-audit-logs};
         mc mb --ignore-existing local/$${MINIO_BUCKET_TIMELINES:-timelines};
+        mc mb --ignore-existing local/milvus-storage;
         echo 'MinIO buckets initialised.';
       "
     environment:
@@ -148,7 +189,7 @@ services:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
-      qdrant:
+      milvus:
         condition: service_healthy
       ollama:
         condition: service_healthy
@@ -195,5 +236,6 @@ volumes:
   postgres_data:
   redis_data:
   minio_data:
-  qdrant_data:
+  etcd_data:
+  milvus_data:
   ollama_data:

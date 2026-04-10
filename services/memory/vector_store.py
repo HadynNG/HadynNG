@@ -1,26 +1,23 @@
 """
-Vector Store — Qdrant-backed semantic memory for RAG and agent memory.
+Vector Store — Milvus-backed semantic memory for RAG and agent recall.
 
-Uses Ollama embeddings (nomic-embed-text) for vectorisation.
-Gracefully degrades to no-op if Qdrant is unavailable.
+Uses pymilvus MilvusClient (2.4+ simplified API) for collection management,
+upsert, and semantic search.  Uses Ollama embeddings (nomic-embed-text).
+Gracefully degrades to no-op if Milvus or Ollama is unavailable.
+
+Collections:
+  agent_memory   — per-agent insight embeddings for cross-mission recall
+  rag_documents  — chunked SOP / corpus for RAG retrieval
 """
 import hashlib
 import uuid
 from typing import Optional
 
 try:
-    from qdrant_client import QdrantClient
-    from qdrant_client.models import (
-        Distance,
-        FieldCondition,
-        Filter,
-        MatchValue,
-        PointStruct,
-        VectorParams,
-    )
-    _QDRANT_AVAILABLE = True
+    from pymilvus import MilvusClient, DataType
+    _MILVUS_AVAILABLE = True
 except ImportError:
-    _QDRANT_AVAILABLE = False
+    _MILVUS_AVAILABLE = False
 
 try:
     import ollama as _ollama
@@ -29,32 +26,36 @@ except ImportError:
     _OLLAMA_AVAILABLE = False
 
 
-# Default embedding model — small, fast, good for retrieval
+# Default embedding model
 _EMBED_MODEL = "nomic-embed-text"
-_EMBED_DIM = 768
+_EMBED_DIM   = 768
 
 
 class VectorStore:
     """
-    Qdrant vector store with Ollama embeddings.
+    Milvus vector store with Ollama embeddings.
+
+    All public methods are no-ops when Milvus or the embedding model is
+    unavailable, so the platform degrades gracefully in demo mode.
     """
 
     def __init__(
         self,
         host: str = "localhost",
-        port: int = 6333,
+        port: int = 19530,
         ollama_host: str = "http://localhost:11434",
         embed_model: str = _EMBED_MODEL,
     ):
+        self._ollama_host  = ollama_host
+        self._embed_model  = embed_model
         self._client: Optional[object] = None
-        self._ollama_host = ollama_host
-        self._embed_model = embed_model
 
-        if _QDRANT_AVAILABLE:
+        if _MILVUS_AVAILABLE:
             try:
-                self._client = QdrantClient(host=host, port=port, timeout=5)
-                # Verify connection
-                self._client.get_collections()
+                uri = f"http://{host}:{port}"
+                self._client = MilvusClient(uri=uri)
+                # Verify connection by listing collections
+                self._client.list_collections()
             except Exception:
                 self._client = None
 
@@ -62,32 +63,40 @@ class VectorStore:
     def connected(self) -> bool:
         return self._client is not None
 
+    # ── Collection management ──────────────────────────────────────────────
+
     def ensure_collection(self, name: str, dim: int = _EMBED_DIM):
-        """Create collection if it doesn't exist."""
+        """Create a Milvus collection if it does not already exist."""
         if not self._client:
             return
         try:
-            collections = [c.name for c in self._client.get_collections().collections]
-            if name not in collections:
+            existing = self._client.list_collections()
+            if name not in existing:
                 self._client.create_collection(
                     collection_name=name,
-                    vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
+                    dimension=dim,
+                    metric_type="COSINE",
+                    auto_id=False,
                 )
         except Exception:
             pass
 
+    # ── Embedding ──────────────────────────────────────────────────────────
+
     def _embed(self, text: str) -> Optional[list[float]]:
-        """Generate embedding vector using Ollama."""
+        """Generate a vector embedding via Ollama."""
         if not _OLLAMA_AVAILABLE:
             return None
         try:
-            client = _ollama.Client(host=self._ollama_host)
+            client   = _ollama.Client(host=self._ollama_host)
             response = client.embed(model=self._embed_model, input=text)
             if hasattr(response, "embeddings") and response.embeddings:
                 return response.embeddings[0]
             return None
         except Exception:
             return None
+
+    # ── Write ──────────────────────────────────────────────────────────────
 
     def upsert(
         self,
@@ -96,7 +105,7 @@ class VectorStore:
         metadata: Optional[dict] = None,
         point_id: Optional[str] = None,
     ):
-        """Embed text and upsert into Qdrant collection."""
+        """Embed *text* and upsert into a Milvus collection."""
         if not self._client:
             return
 
@@ -106,22 +115,23 @@ class VectorStore:
             return
 
         pid = point_id or str(uuid.uuid4())
-        # Qdrant needs UUID or int ids
         try:
-            uid = uuid.UUID(pid)
+            uid = str(uuid.UUID(pid))
         except ValueError:
-            uid = uuid.UUID(hashlib.md5(pid.encode()).hexdigest())
+            uid = str(uuid.UUID(hashlib.md5(pid.encode()).hexdigest()))
 
-        payload = metadata or {}
+        payload = dict(metadata or {})
         payload["text"] = text
 
         try:
             self._client.upsert(
                 collection_name=collection,
-                points=[PointStruct(id=str(uid), vector=vector, payload=payload)],
+                data=[{"id": uid, "vector": vector, **payload}],
             )
         except Exception:
             pass
+
+    # ── Read ───────────────────────────────────────────────────────────────
 
     def search(
         self,
@@ -131,7 +141,7 @@ class VectorStore:
         score_threshold: float = 0.5,
         filters: Optional[dict] = None,
     ) -> list[dict]:
-        """Semantic search in a Qdrant collection."""
+        """Semantic search in a Milvus collection."""
         if not self._client:
             return []
 
@@ -140,38 +150,42 @@ class VectorStore:
         if vector is None:
             return []
 
-        # Build filter
-        qdrant_filter = None
-        if filters and _QDRANT_AVAILABLE:
-            conditions = [
-                FieldCondition(key=k, match=MatchValue(value=v))
-                for k, v in filters.items()
-            ]
-            qdrant_filter = Filter(must=conditions)
+        # Build Milvus filter expression
+        expr = None
+        if filters:
+            parts = [f'{k} == "{v}"' if isinstance(v, str) else f"{k} == {v}"
+                     for k, v in filters.items()]
+            expr = " && ".join(parts)
 
         try:
-            results = self._client.query_points(
+            results = self._client.search(
                 collection_name=collection,
-                query=vector,
+                data=[vector],
                 limit=top_k,
-                score_threshold=score_threshold,
-                query_filter=qdrant_filter,
+                filter=expr,
+                output_fields=["text", *list((filters or {}).keys())],
+                search_params={"metric_type": "COSINE"},
             )
+            hits = results[0] if results else []
             return [
-                {"id": str(r.id), "score": r.score, **r.payload}
-                for r in results.points
+                {
+                    "id":     h["id"],
+                    "score":  h["distance"],
+                    **h["entity"],
+                }
+                for h in hits
+                if h["distance"] >= score_threshold
             ]
         except Exception:
             return []
 
+    # ── Health ─────────────────────────────────────────────────────────────
+
     def health_check(self) -> dict:
         if self._client:
             try:
-                collections = self._client.get_collections()
-                return {
-                    "status": "ok",
-                    "collections": [c.name for c in collections.collections],
-                }
+                collections = self._client.list_collections()
+                return {"status": "ok", "collections": collections}
             except Exception as e:
                 return {"status": "error", "error": str(e)}
-        return {"status": "unavailable", "note": "Qdrant not connected"}
+        return {"status": "unavailable", "note": "Milvus not connected"}

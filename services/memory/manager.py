@@ -6,7 +6,7 @@ Memory tiers:
      TTL-based eviction. Keyed by mission_id.
   2. Long-term (PostgreSQL): User preferences, historical decisions,
      structured records. Persistent, queryable.
-  3. Semantic (Qdrant): Vector embeddings for RAG document retrieval
+  3. Semantic (Milvus): Vector embeddings for RAG document retrieval
      and agent memory recall. Similarity search.
 """
 from datetime import datetime
@@ -21,7 +21,7 @@ class MemoryManager:
     Unified memory interface for all agents and services.
 
     Usage:
-        memory = MemoryManager(redis_url=..., qdrant_host=...)
+        memory = MemoryManager(redis_url=..., milvus_host=...)
         # Short-term
         memory.set_context("mission-123", {"status": "IN_PROGRESS", ...})
         ctx = memory.get_context("mission-123")
@@ -36,12 +36,12 @@ class MemoryManager:
     def __init__(
         self,
         redis_url: str = "redis://localhost:6379/0",
-        qdrant_host: str = "localhost",
-        qdrant_port: int = 6333,
+        milvus_host: str = "localhost",
+        milvus_port: int = 19530,
         postgres_dsn: Optional[str] = None,
     ):
         self.redis = RedisStore(redis_url)
-        self.vector = VectorStore(host=qdrant_host, port=qdrant_port)
+        self.vector = VectorStore(host=milvus_host, port=milvus_port)
         self._postgres_dsn = postgres_dsn
 
     # ── Short-term Memory (Redis) ────────────────────────────────────────────
@@ -163,6 +163,6 @@ class MemoryManager:
 
     def health_check(self) -> dict:
         return {
-            "redis": self.redis.health_check(),
-            "qdrant": self.vector.health_check(),
+            "redis":  self.redis.health_check(),
+            "milvus": self.vector.health_check(),
         }
