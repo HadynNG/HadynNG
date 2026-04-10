@@ -95,9 +95,7 @@ class Settings(BaseSettings):
     broker_host: str = "0.0.0.0"
     broker_port: int = 8000
 
-    # ── MCP Servers ──────────────────────────────────────────────────────────
-    agent_zero_mcp_host: str = "0.0.0.0"
-    agent_zero_mcp_port: int = 8100
+    # ── Tools MCP Server ─────────────────────────────────────────────────────
     tools_mcp_host: str = "0.0.0.0"
     tools_mcp_port: int = 8101
 

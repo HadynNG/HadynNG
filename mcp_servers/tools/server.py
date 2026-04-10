@@ -1,9 +1,10 @@
 """
 Tools MCP Server — exposes CRM, identity verification, and sanctions screening
-as MCP tools that agents can call.
+as MCP tools for any external MCP-compatible client.
 
 Architecture:
-  AgentZero MCP → Agents → Tools MCP Server → Tool implementations
+  External MCP Client → Tools MCP Server → Tool implementations
+  (Agents call the same tool classes directly via Python during pipeline execution)
 
 Tools exposed:
   - crm_search: Search CRM by customer name

@@ -37,15 +37,14 @@ The proposed production upgrade replaces the custom sequential executor with **L
 
 ---
 
-## 4. Agent Communication Protocol
+## 4. Tools MCP Server
 
 | Component | Technology | Version | Role |
 |-----------|-----------|---------|------|
-| Agent Protocol | MCP (Model Context Protocol) | 1.0+ | Standardised message passing between the orchestrator, agents, and tools |
-| Agent Dispatcher | AgentZero MCP Server | Internal | Central dispatcher routing missions to the 6-agent pipeline (port 8100) |
+| Agent Protocol | MCP (Model Context Protocol) | 1.0+ | Used by external MCP clients to invoke tool integrations |
 | Tool Server | Tools MCP Server | Internal | Exposes CRM, Identity, and Screening tools over MCP (port 8101) |
 
-MCP decouples tool invocation from agent logic, enabling any MCP-compatible client to call into the platform without code changes.
+The Tools MCP Server is for external MCP-compatible clients. During pipeline execution, agents invoke the same tool classes directly via Python — no MCP hop required. Pipeline orchestration is handled by LangGraph (Section 9).
 
 ---
 
@@ -179,7 +178,6 @@ Collections:
 | `ollama` | ollama/ollama:latest | 11434 | `/api/version` |
 | `minio-init` | minio/mc:latest | — | Bucket init job (exits) |
 | `mission-broker` | Local Dockerfile | 8000 | `/health` |
-| `agent-zero-mcp` | Local Dockerfile | 8100 | MCP handshake |
 | `tools-mcp` | Local Dockerfile | 8101 | MCP handshake |
 
 All services share a Docker network (`kyc-network`) and use named volumes for data persistence.
@@ -301,8 +299,8 @@ All configuration is managed through environment variables bound to a Pydantic s
 | PostgreSQL | `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` |
 | Redis | `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD` |
 | MinIO | `MINIO_HOST`, `MINIO_PORT`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD` |
-| Milvus | `MILVUS_HOST`, `MILVUS_PORT`, `MILVUS_GRPC_PORT` |
-| Services | `BROKER_HOST`, `BROKER_PORT`, `AGENT_ZERO_MCP_HOST`, `TOOLS_MCP_HOST` |
+| Milvus | `MILVUS_HOST`, `MILVUS_PORT`, `MILVUS_HTTP_PORT` |
+| Services | `BROKER_HOST`, `BROKER_PORT`, `TOOLS_MCP_HOST`, `TOOLS_MCP_PORT` |
 | Logging | `LOG_LEVEL` |
 
 ---
@@ -339,7 +337,6 @@ All configuration is managed through environment variables bound to a Pydantic s
 | Service | Host Port | Protocol |
 |---------|-----------|---------|
 | Mission Broker (API Gateway) | 8000 | HTTP / WebSocket |
-| AgentZero MCP Server | 8100 | HTTP (MCP) |
 | Tools MCP Server | 8101 | HTTP (MCP) |
 | Ollama (LLM) | 11434 | HTTP |
 | PostgreSQL | 5432 | TCP |
@@ -400,8 +397,7 @@ Current implementation status versus production requirements, with estimated bac
 | **MinIO** | Bucket creation in docker-compose, no upload/download code | File upload/download service, pre-signed URL generation, lifecycle policies, virus scan hook | Medium |
 | **Milvus** | Wrapper with embedding + search, graceful fallback | Collection management, HNSW index tuning, embedding pipeline for SOP/RAG corpus ingestion, etcd HA | Medium |
 | **Ollama** | Works end-to-end, LLM Gateway with caching | Model warm-up script, health monitoring, GPU memory management, fallback model routing | Light |
-| **AgentZero MCP** | Fully defined tools, agents callable | Production stdio → HTTP/SSE transport, bearer token auth, structured logging, connection pool | Medium |
-| **Tools MCP** | Fixed and working | Same transport + auth needs as AgentZero MCP | Medium |
+| **Tools MCP** | Fixed and working | stdio → HTTP/SSE transport, bearer token auth, structured logging | Medium |
 | **Docker Compose** | Complete with health checks | Resource limits (`mem_limit`, `cpus`), log drivers (json-file / fluentd), secrets management, network segmentation | Light |
 | **CI/CD** | None | GitHub Actions pipeline, image registry (GHCR/ECR), staging + prod environments, automated rollback | Medium |
 | **Observability** | Audit logs + timeline JSON files | Prometheus metrics (FastAPI + Milvus + Redis exporters), structured JSON logging, Grafana dashboards, PagerDuty alerting | Medium |

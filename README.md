@@ -2,9 +2,9 @@
 
 A production-ready agentic AI platform for **KYC (Know Your Customer) Name Screening**, built for Hong Kong's AMLO/HKMA/SFC compliance frameworks.
 
-**Architecture:** Mission Broker → Orchestrator → AgentZero MCP → Agent Pipeline → Tool MCP → Tools
+**Architecture:** Mission Broker → MissionExecutor → LangGraph StateGraph → Agent Pipeline → Tools
 
-**Stack:** Ollama + qwen3.5:9b | FastAPI | MCP | PostgreSQL | Redis | MinIO | Qdrant
+**Stack:** Ollama + qwen3.5:9b | FastAPI | LangGraph | MCP | PostgreSQL | Redis | MinIO | Milvus
 
 ---
 
@@ -25,16 +25,16 @@ A production-ready agentic AI platform for **KYC (Know Your Customer) Name Scree
                              │
            ┌─────────────────┼──────────────────────┐
            │                 │                      │
-  ┌────────▼──────┐  ┌──────▼──────┐  ┌────────────▼────────────┐
-  │ IntentParser   │  │ Orchestrator│  │   Memory Service        │
-  │ (SOP-based     │  │ + Planner   │  │   Redis   → short-term  │
-  │  classifier)   │  │ (LLM plan)  │  │   Qdrant  → vectors     │
-  └────────────────┘  └──────┬──────┘  │   Postgres → long-term  │
-                             │         └─────────────────────────┘
+  ┌────────▼──────┐  ┌──────▼──────────┐  ┌────────▼────────────────┐
+  │ IntentParser   │  │ MissionExecutor │  │   Memory Service        │
+  │ (SOP-based     │  │ + TaskPlanner   │  │   Redis   → short-term  │
+  │  classifier)   │  │                 │  │   Milvus  → vectors     │
+  └────────────────┘  └──────┬──────────┘  │   Postgres → long-term  │
+                             │             └─────────────────────────┘
                 ┌────────────▼──────────────┐
-                │   AgentZero MCP Server    │  ← Central agent dispatcher
-                │   (wraps all 6 agents)    │    (port 8100)
-                └────────────┬──────────────┘
+                │  LangGraph StateGraph      │  ← orchestrator/kyc_graph.py
+                │  (orchestrator/kyc_graph)  │    KYCState • conditional edges
+                └────────────┬──────────────┘    Redis checkpointer
                              │
          ┌───────────────────▼─────────────────────────────┐
          │                Agent Pipeline                    │
@@ -46,15 +46,12 @@ A production-ready agentic AI platform for **KYC (Know Your Customer) Name Scree
          │  5. DecisionAgent         (Steps 5.1–5.3)  ← LLM│
          │  6. DocumentationAgent    (Steps 6.1–6.2)       │
          └───────────────────┬─────────────────────────────┘
-                             │
-                ┌────────────▼──────────────┐
-                │   Tools MCP Server        │  ← External integrations
-                │   CRM, Identity, Screening│    (port 8101)
-                └────────────┬──────────────┘
-                             │
+                             │  direct Python calls
          ┌───────────────────┼───────────────────┐
          ▼                   ▼                   ▼
     CRM Tool          Identity Tool       Screening Tool
+
+    (Tools MCP Server exposes same tools for external MCP clients — port 8101)
 ```
 
 ---
@@ -74,19 +71,18 @@ HadynNG/
 │   ├── memory/                      # Memory service
 │   │   ├── manager.py               # Unified short/long/semantic memory
 │   │   ├── redis_store.py           # Redis (context, cache, pub/sub)
-│   │   └── vector_store.py          # Qdrant (RAG, agent memory)
+│   │   └── vector_store.py          # Milvus (RAG, agent memory)
 │   └── mission_broker/              # FastAPI HTTP gateway
 │       └── app.py                   # REST + WebSocket endpoints
 │
 ├── mcp_servers/                     # MCP protocol servers
-│   ├── agent_zero/                  # Central agent dispatcher
-│   │   └── server.py                # Wraps all 6 agents as MCP tools
 │   └── tools/                       # External tool integrations
 │       └── server.py                # CRM, identity, screening as MCP tools
 │
 ├── orchestrator/                    # Core pipeline coordination
+│   ├── kyc_graph.py                 # LangGraph StateGraph (KYCState + build_graph)
 │   ├── intent_parser.py             # Free-form prompt → structured KYC intent
-│   ├── mission_executor.py          # Central coordinator (demo + production)
+│   ├── mission_executor.py          # Drives LangGraph graph.stream() + timeline
 │   ├── mission_timeline.py          # Real-time status tracker (JSON)
 │   └── task_planner.py              # LLM-based mission planning
 │
@@ -129,7 +125,7 @@ HadynNG/
 ├── infra/                           # Infrastructure
 │   └── init.sql                     # PostgreSQL schema (WORM audit logs)
 │
-├── docker-compose.yml               # Full stack: PG + Redis + MinIO + Qdrant + Ollama
+├── docker-compose.yml               # Full stack: PG + Redis + MinIO + etcd + Milvus + Ollama
 ├── Dockerfile                       # Application container
 ├── .env.example                     # Environment template
 ├── requirements.txt                 # Python dependencies
@@ -207,10 +203,11 @@ curl -X POST http://localhost:8000/chat \
 | Service | URL | Purpose |
 |---------|-----|---------|
 | Mission Broker | http://localhost:8000 | API gateway |
+| Tools MCP | localhost:8101 | External tool integrations (MCP) |
 | MinIO Console | http://localhost:9001 | Document storage UI |
+| Milvus | http://localhost:9091 | Vector DB health / metrics |
 | PostgreSQL | localhost:5432 | Database |
 | Redis | localhost:6379 | Cache + pub/sub |
-| Qdrant | http://localhost:6333 | Vector DB dashboard |
 | Ollama | http://localhost:11434 | LLM API |
 
 ---
@@ -243,37 +240,25 @@ curl -X POST http://localhost:8000/chat \
 
 | Tier | Store | Purpose |
 |------|-------|---------|
-| Short-term | Redis | Mission context, session state (24h TTL) |
+| Short-term | Redis | Mission context, session state (24h TTL), LangGraph checkpointer |
 | Long-term | PostgreSQL | Audit logs, mission records, user preferences |
-| Semantic | Qdrant | RAG document embeddings, agent memory (cross-mission learning) |
+| Semantic | Milvus | RAG document embeddings, agent memory (cross-mission learning) |
 
 Agents store insights after each phase. Future missions recall relevant past decisions via vector similarity search.
 
 ---
 
-## MCP Tools Reference
+## Tools MCP Reference (port 8101)
 
-### AgentZero MCP (port 8100)
-| Tool | Description |
-|------|-------------|
-| `run_data_collection` | Phase 1: Event classification, CRM lookup, identity verification |
-| `run_risk_assessment` | Phase 2: Risk scoring and LLM narrative |
-| `run_screening` | Phase 3: Name variants, sanctions/PEP screening |
-| `run_alert_review` | Phase 4: Triage, investigation, EDD |
-| `run_decision` | Phase 5: Final decision, MLRO escalation, STR |
-| `run_documentation` | Phase 6: Audit trail, notifications |
-| `run_full_pipeline` | All 6 phases in sequence |
-| `agent_status` | Check available agents |
-| `get_context` | Retrieve mission context |
+The Tools MCP Server exposes CRM, identity, and screening tools over the Model Context Protocol for any external MCP-compatible client. Agents call the same tool classes directly via Python internally.
 
-### Tools MCP (port 8101)
 | Tool | Description |
 |------|-------------|
 | `crm_search` | Fuzzy name search in CRM |
 | `crm_get` | Get customer by ID |
 | `crm_register` | Register new customer |
-| `identity_verify` | Verify identity documents |
-| `screening_screen` | Screen against sanctions/PEP lists |
+| `identity_verify` | Verify identity documents (HKID / passport) |
+| `screening_screen` | Screen against UN/OFAC/EU/HKMA sanctions + PEP lists |
 | `screening_adverse_media` | Search adverse media |
 | `jurisdiction_risk` | FATF jurisdiction risk lookup |
 
@@ -314,9 +299,9 @@ Key environment variables:
 - `OLLAMA_HOST` — LLM server URL
 - `OLLAMA_MODEL` — Model name (default: `qwen3.5:9b`)
 - `POSTGRES_*` — Database connection
-- `REDIS_*` — Cache connection
+- `REDIS_*` — Cache + LangGraph checkpointer
 - `MINIO_*` — Object storage
-- `QDRANT_*` — Vector database
+- `MILVUS_*` — Vector database (host, port 19530)
 
 For demo mode, no `.env` is needed — all defaults work with local Ollama.
 
