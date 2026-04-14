@@ -11,7 +11,7 @@
 
 HadynNG is a production-ready, AI-powered KYC (Know Your Customer) name screening platform designed for Hong Kong's regulatory frameworks (AMLO Cap. 615, HKMA AML/CFT Guidelines, SFC AML Circular, FATF). It combines rule-based compliance logic with LLM-powered reasoning across a 6-phase agentic pipeline.
 
-The proposed production upgrade replaces the custom sequential executor with **LangGraph** (typed state graph orchestration) and **AgentField** (infrastructure control plane), while preserving all existing agent logic.
+**LangGraph** (typed state graph orchestration) is the current pipeline engine, replacing the custom sequential executor while preserving all existing agent logic. **AgentField** (infrastructure control plane) is the proposed production deployment layer for managed hosting, observability, and visual graph editing.
 
 ---
 
@@ -196,9 +196,9 @@ The platform uses a three-tier memory model:
 
 ---
 
-## 9. Proposed Orchestration — LangGraph + AgentField
+## 9. Orchestration — LangGraph (Implemented) + AgentField (Proposed)
 
-This section describes the planned upgrade path for the orchestration layer. **No code changes have been made yet.** The current executor (`orchestrator/mission_executor.py`) remains in place.
+LangGraph is live in the codebase. `orchestrator/kyc_graph.py` defines the `KYCState` TypedDict and `build_graph()` factory; `orchestrator/mission_executor.py` drives `graph.stream()` for real-time WebSocket updates. AgentField is the planned managed deployment layer and is not yet integrated.
 
 ### 9.1 LangGraph (Orchestration Engine)
 
@@ -421,5 +421,5 @@ Current implementation status versus production requirements, with estimated bac
 | Three-tier memory (Redis / PostgreSQL / Milvus) | Redis for speed, PostgreSQL for durability, Milvus for semantic retrieval at scale |
 | Milvus over pgvector | Dedicated vector engine with horizontal scaling, GPU-accelerated HNSW indexing, and collection-level isolation; pgvector couples vector workload to OLTP database |
 | Mock-first tool design | All tools work with flat-file seed data, enabling offline development and testing without external API credentials |
-| LangGraph for orchestration (proposed) | Formalises the existing `context` dict as a typed `KYCState`; adds conditional branching, built-in checkpointing, and streaming without changing agent class code |
+| LangGraph for orchestration | Formalises the existing `context` dict as a typed `KYCState`; adds conditional branching, built-in checkpointing, and streaming without changing agent class code |
 | AgentField as control plane (proposed) | Offloads deployment, run tracing, and pipeline versioning to a managed layer; compliance team can inspect graph topology without reading code |
