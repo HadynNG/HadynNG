@@ -1,0 +1,12 @@
+{
+  "account_id": "M002",
+  "account_name": "Linda Wong Siu-Ping",
+  "alert": {
+    "alert_type": "network_flag",
+    "alert_source": "inter_bank_intelligence",
+    "priority": "HIGH",
+    "triggered_at": "2025-02-10T14:30:00Z",
+    "notes": "Inter-bank intelligence sharing: account linked to NET-001 mule network. Police CCC referral received."
+  },
+  "notes": "HK Police Commercial Crime Bureau referral HK-2024-CCC-8821. Multiple linked accounts confirmed by peer bank."
+}

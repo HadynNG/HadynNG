@@ -31,7 +31,7 @@ from rich.prompt import Confirm, Prompt
 from rich.rule import Rule
 from rich.table import Table
 
-from orchestrator import IntentParser, MissionExecutor
+from orchestrator import IntentParser, MissionExecutor, MuleExecutor
 from tools.crm_tool import CRMTool
 
 console = Console()
@@ -62,7 +62,7 @@ Keep your answers concise, accurate, and professional.
 If you are unsure about something, say so clearly."""
 
 
-# ── Preset demo cases ─────────────────────────────────────────────────────────
+# ── KYC Screening preset demo cases ──────────────────────────────────────────
 _PRESETS = {
     "clean":      ROOT / "demo" / "cases" / "case_clean.json",
     "medium":     ROOT / "demo" / "cases" / "case_medium_risk.json",
@@ -74,6 +74,18 @@ _PRESET_EXPECTED = {
     "medium":     "APPROVE_WITH_CONDITIONS",
     "pep":        "ESCALATE_TO_MLRO",
     "sanctioned": "REJECT",
+}
+
+# ── Mule Account Hunting preset demo cases ────────────────────────────────────
+_MULE_PRESETS = {
+    "mule-unwitting":    ROOT / "demo" / "cases" / "case_mule_unwitting.json",
+    "mule-professional": ROOT / "demo" / "cases" / "case_mule_professional.json",
+    "mule-clean":        ROOT / "demo" / "cases" / "case_mule_clean.json",
+}
+_MULE_PRESET_EXPECTED = {
+    "mule-unwitting":    "FILE_SAR or ESCALATE_TO_MLRO",
+    "mule-professional": "FILE_SAR",
+    "mule-clean":        "CLOSE_NO_ACTION or MONITOR",
 }
 
 
@@ -263,7 +275,42 @@ def _kyc_sub_flow(intent: dict) -> dict | None:
     }
 
 
-# ── Pipeline runner ───────────────────────────────────────────────────────────
+# ── Mule pipeline runner ──────────────────────────────────────────────────────
+def _run_mule_pipeline(executor: MuleExecutor, payload: dict) -> None:
+    """Execute the mule hunting pipeline and print the final result panel."""
+    expected = payload.pop("_expected", "N/A")
+    try:
+        result = executor.execute(payload)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Investigation interrupted.[/yellow]\n")
+        return
+    except Exception as e:
+        console.print(f"\n[red]Investigation error: {e}[/red]\n")
+        return
+
+    disposition = result.get("final_disposition", "N/A")
+    color = {
+        "FILE_SAR": "red",
+        "ESCALATE_TO_MLRO": "red",
+        "MONITOR": "yellow",
+        "CLOSE_NO_ACTION": "green",
+    }.get(disposition, "white")
+
+    console.print(
+        Panel(
+            f"Final Disposition : [bold {color}]{disposition}[/bold {color}]\n"
+            f"Expected          : {expected}\n"
+            f"Mule Type         : {result.get('mule_type', 'N/A')}\n"
+            f"Typology          : {result.get('fraud_typology', 'N/A')}\n"
+            f"SAR Reference     : {result.get('sar_reference') or 'None'}",
+            title="[bold]Mule Investigation Complete[/bold]",
+            border_style="red",
+        )
+    )
+    console.print()
+
+
+# ── KYC Pipeline runner ───────────────────────────────────────────────────────
 def _run_pipeline(executor: MissionExecutor, payload: dict) -> None:
     """Execute the KYC pipeline and print the final result panel."""
     expected = payload.pop("_expected", "N/A")
@@ -307,30 +354,49 @@ def _load_preset(name: str) -> dict:
     return {**payload, "_expected": _PRESET_EXPECTED[name]}
 
 
+def _load_mule_preset(name: str) -> dict:
+    with open(_MULE_PRESETS[name], encoding="utf-8") as f:
+        payload = json.load(f)
+    console.print(
+        Panel(
+            f"[bold]Preset:[/bold]   {name}\n"
+            f"[bold]Expected:[/bold] {_MULE_PRESET_EXPECTED[name]}",
+            title="[bold]Mule Hunting Demo Preset[/bold]",
+            border_style="red",
+        )
+    )
+    return {**payload, "_expected": _MULE_PRESET_EXPECTED[name]}
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 def main():
     _print_welcome()
 
     # ── Parse --demo flag ─────────────────────────────────────────────────────
+    all_presets = {**_PRESETS, **_MULE_PRESETS}
     demo_flag = None
     args = sys.argv[1:]
     if "--demo" in args:
         idx = args.index("--demo")
-        if idx + 1 < len(args) and args[idx + 1] in _PRESETS:
+        if idx + 1 < len(args) and args[idx + 1] in all_presets:
             demo_flag = args[idx + 1]
         else:
             console.print(
-                f"[red]Unknown --demo value. Choose from: {list(_PRESETS)}[/red]"
+                f"[red]Unknown --demo value. Choose from: {list(all_presets)}[/red]"
             )
             sys.exit(1)
 
     # Components created once — reused across all turns
     intent_parser = IntentParser(model=MODEL, ollama_host=OLLAMA_HOST)
     executor = MissionExecutor(model=MODEL, ollama_host=OLLAMA_HOST)
+    mule_executor = MuleExecutor(model=MODEL, ollama_host=OLLAMA_HOST)
 
     # Run preset pipeline first if --demo was given
     if demo_flag:
-        _run_pipeline(executor, _load_preset(demo_flag))
+        if demo_flag in _MULE_PRESETS:
+            _run_mule_pipeline(mule_executor, _load_mule_preset(demo_flag))
+        else:
+            _run_pipeline(executor, _load_preset(demo_flag))
 
     # ── Main conversational loop ──────────────────────────────────────────────
     while True:

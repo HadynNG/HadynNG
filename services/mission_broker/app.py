@@ -71,6 +71,22 @@ class ChatResponse(BaseModel):
     conversation_id: str
 
 
+class MuleAlertRequest(BaseModel):
+    account_id: str
+    account_name: Optional[str] = None
+    alert_type: str = "transaction_velocity"
+    alert_source: str = "system"
+    priority: Optional[str] = None
+    notes: str = ""
+
+
+class MuleMissionResponse(BaseModel):
+    mission_id: str
+    status: str
+    account_id: str
+    message: str
+
+
 class HealthResponse(BaseModel):
     status: str
     services: dict
@@ -228,6 +244,52 @@ def _register_routes(app: FastAPI):
         conv_id = req.conversation_id or str(uuid.uuid4())
         return ChatResponse(reply=result["content"], conversation_id=conv_id)
 
+    # ── Mule Account Hunting ──────────────────────────────────────────────
+
+    @app.post("/mule-missions", response_model=MuleMissionResponse)
+    async def create_mule_mission(req: MuleAlertRequest):
+        """Create and execute a mule account investigation mission."""
+        mission_id = f"MULE-{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:6].upper()}"
+
+        alert = {
+            "alert_type": req.alert_type,
+            "alert_source": req.alert_source,
+            "priority": req.priority or "MEDIUM",
+            "triggered_at": datetime.utcnow().isoformat() + "Z",
+            "notes": req.notes,
+        }
+
+        payload = {
+            "account_id": req.account_id,
+            "account_name": req.account_name or req.account_id,
+            "alert": alert,
+            "notes": req.notes,
+        }
+
+        app.state.memory.set_context(mission_id, {
+            "mission_id": mission_id,
+            "payload": payload,
+            "status": "QUEUED",
+            "created_at": datetime.utcnow().isoformat() + "Z",
+        })
+
+        asyncio.create_task(_run_mule_mission(app, mission_id, payload))
+
+        return MuleMissionResponse(
+            mission_id=mission_id,
+            status="QUEUED",
+            account_id=req.account_id,
+            message="Mule investigation mission queued for execution.",
+        )
+
+    @app.get("/mule-missions/{mission_id}")
+    async def get_mule_mission(mission_id: str):
+        """Get mule investigation status and timeline."""
+        ctx = app.state.memory.get_context(mission_id)
+        if ctx is None:
+            raise HTTPException(status_code=404, detail="Mule mission not found")
+        return ctx
+
     # ── WebSocket for real-time updates ───────────────────────────────────
 
     @app.websocket("/ws/missions/{mission_id}")
@@ -285,6 +347,47 @@ async def _run_mission(app: FastAPI, mission_id: str, payload: dict):
 
     except Exception as e:
         logger.error("Mission %s failed: %s", mission_id, e)
+        app.state.memory.update_context(mission_id, {
+            "status": "FAILED",
+            "error": str(e),
+        })
+
+
+async def _run_mule_mission(app: FastAPI, mission_id: str, payload: dict):
+    """Execute mule investigation in background thread (blocking LLM calls)."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
+    from orchestrator import MuleExecutor
+
+    try:
+        app.state.memory.update_context(mission_id, {"status": "IN_PROGRESS"})
+
+        executor = MuleExecutor(
+            model=settings.ollama_model,
+            ollama_host=settings.ollama_host,
+        )
+
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, executor.execute, payload)
+
+        app.state.memory.update_context(mission_id, {
+            "status": "COMPLETE",
+            "final_disposition": result.get("final_disposition"),
+            "mule_type": result.get("mule_type"),
+            "sar_reference": result.get("sar_reference"),
+            "total_exposure_hkd": result.get("total_exposure_hkd"),
+            "completed_at": datetime.utcnow().isoformat() + "Z",
+        })
+
+        app.state.memory.publish_event(f"mission:{mission_id}", {
+            "event": "completed",
+            "disposition": result.get("final_disposition"),
+        })
+
+    except Exception as e:
+        logger.error("Mule mission %s failed: %s", mission_id, e)
         app.state.memory.update_context(mission_id, {
             "status": "FAILED",
             "error": str(e),
