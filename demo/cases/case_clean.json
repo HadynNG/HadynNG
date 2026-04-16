@@ -1,0 +1,10 @@
+{
+  "customer_id": "C001",
+  "event": {
+    "event_type": "onboarding",
+    "trigger_source": "web_portal",
+    "triggered_at": "2024-03-04T09:00:00Z",
+    "notes": "New retail client onboarding via digital channel"
+  },
+  "mission_description": "Perform full KYC name screening for new individual customer C001 (James Wong Wai-Man, HKG national) onboarding via the digital channel. Verify identity, assess risk, screen against all applicable sanctions and PEP lists, and make an approval decision per HKMA and AMLO requirements."
+}

@@ -1,0 +1,12 @@
+{
+  "account_id": "M001",
+  "account_name": "Kevin Lau Ka-Fai",
+  "alert": {
+    "alert_type": "pass_through",
+    "alert_source": "transaction_monitoring",
+    "priority": "HIGH",
+    "triggered_at": "2025-02-12T09:00:00Z",
+    "notes": "Account showing near 100% pass-through ratio over 6 weeks. Credits from unknown overseas entities immediately forwarded out."
+  },
+  "notes": "Flagged by TMS rule: credit-to-debit same-day ratio > 95% for 6 consecutive weeks"
+}

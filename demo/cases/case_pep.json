@@ -1,0 +1,10 @@
+{
+  "customer_id": "C002",
+  "event": {
+    "event_type": "onboarding",
+    "trigger_source": "relationship_manager",
+    "triggered_at": "2024-03-04T10:30:00Z",
+    "notes": "High-value client referral — government official, self-declared PEP"
+  },
+  "mission_description": "Perform full KYC name screening for new individual customer C002 (Senator Marcus Delgado, PHL national), a self-declared Politically Exposed Person (PEP) from the Philippines. The customer is a senior government official. Apply enhanced due diligence procedures, verify identity, screen against PEP and sanctions lists, and determine the appropriate onboarding decision per HKMA AMLO requirements."
+}

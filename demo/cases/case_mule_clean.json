@@ -1,0 +1,12 @@
+{
+  "account_id": "M003",
+  "account_name": "David Chan Ho-Yin",
+  "alert": {
+    "alert_type": "transaction_velocity",
+    "alert_source": "transaction_monitoring",
+    "priority": "LOW",
+    "triggered_at": "2025-01-05T10:15:00Z",
+    "notes": "TMS rule triggered: high number of unique counterparties in rolling 90-day period."
+  },
+  "notes": "Customer is a freelance designer with multiple legitimate clients. Likely false positive."
+}
